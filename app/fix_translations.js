@@ -1,0 +1,72 @@
+const fs = require('fs');
+let code = fs.readFileSync('src/components/ProjectDetail.tsx', 'utf-8');
+
+// List of replacements
+const replacements = [
+  ['language === \'en\' ? "Back to Dashboard" : "Retour au Tableau"', 'language === \'en\' ? "Back to Dashboard" : language === \'fr\' ? "Retour au Tableau" : "العودة إلى اللوحة"'],
+  ['language === \'en\' ? "In Progress" : "En cours"', 'language === \'en\' ? "In Progress" : language === \'fr\' ? "En cours" : "قيد التنفيذ"'],
+  ['language === \'en\' ? "Completed" : "Complété"', 'language === \'en\' ? "Completed" : language === \'fr\' ? "Complété" : "مكتمل"'],
+  ['language === \'en\' ? "Planning" : "Planification"', 'language === \'en\' ? "Planning" : language === \'fr\' ? "Planification" : "قيد التخطيط"'],
+  ['language === \'en\' ? "Settings" : "Réglages"', 'language === \'en\' ? "Settings" : language === \'fr\' ? "Réglages" : "الإعدادات"'],
+  ['language === \'en\' ? "Used Limit" : "Limite Utilisée"', 'language === \'en\' ? "Used Limit" : language === \'fr\' ? "Limite Utilisée" : "الحد المستخدم"'],
+  ['language === \'en\' ? "Project Budget" : "Budget Alloué"', 'language === \'en\' ? "Project Budget" : language === \'fr\' ? "Budget Alloué" : "الميزانية المخصصة"'],
+  ['language === \'en\' ? "Sourced Total" : "Dépenses Cumulées"', 'language === \'en\' ? "Sourced Total" : language === \'fr\' ? "Dépenses Cumulées" : "إجمالي المصروفات"'],
+  ['language === \'en\' ? "Capital Left" : "Capital Restant"', 'language === \'en\' ? "Capital Left" : language === \'fr\' ? "Capital Restant" : "رأس المال المتبقي"'],
+  ['language === \'en\' ? "Per Member Split" : "Quote-part par membre"', 'language === \'en\' ? "Per Member Split" : language === \'fr\' ? "Quote-part par membre" : "حصة كل عضو"'],
+  ['language === \'en\' ? "Overview & Share" : "Résumé & Partage"', 'language === \'en\' ? "Overview & Share" : language === \'fr\' ? "Résumé & Partage" : "الملخص والمشاركة"'],
+  ['language === \'en\' ? "Expenditures" : "Dépenses"', 'language === \'en\' ? "Expenditures" : language === \'fr\' ? "Dépenses" : "المصروفات"'],
+  ['language === \'en\' ? "Timeline Tasks" : "Tâches"', 'language === \'en\' ? "Timeline Tasks" : language === \'fr\' ? "Tâches" : "المهام"'],
+  ['language === \'en\' ? "Documents" : "Factures & Bons"', 'language === \'en\' ? "Documents" : language === \'fr\' ? "Factures & Bons" : "الفواتير والمستندات"'],
+  ['language === \'en\' ? "Total Paid Per Member" : "Total payé par membre"', 'language === \'en\' ? "Total Paid Per Member" : language === \'fr\' ? "Total payé par membre" : "إجمالي المدفوعات لكل عضو"'],
+  ['language === \'en\' ? "Members" : "Membres"', 'language === \'en\' ? "Members" : language === \'fr\' ? "Membres" : "الأعضاء"'],
+  ['language === \'en\' ? "overpaid" : "de trop"', 'language === \'en\' ? "overpaid" : language === \'fr\' ? "de trop" : "دفع زائد"'],
+  ['language === \'en\' ? "owed" : "dû"', 'language === \'en\' ? "owed" : language === \'fr\' ? "dû" : "مستحق"'],
+  ['language === \'en\' ? "Workspace Timeline" : "Jalons du chantier"', 'language === \'en\' ? "Workspace Timeline" : language === \'fr\' ? "Jalons du chantier" : "الجدول الزمني للورشة"'],
+  ['language === \'en\' ? "Workspace Expenditures" : "Historique des dépenses"', 'language === \'en\' ? "Workspace Expenditures" : language === \'fr\' ? "Historique des dépenses" : "تاريخ المصروفات"'],
+  ['language === \'en\' ? "Create record" : "Enregistrer une dépense"', 'language === \'en\' ? "Create record" : language === \'fr\' ? "Enregistrer une dépense" : "تسجيل مصروف"'],
+  ['language === \'en\' ? "Paid by " : "Payé par "', 'language === \'en\' ? "Paid by " : language === \'fr\' ? "Payé par " : "دفع بواسطة "'],
+  ['language === \'en\' ? "Delete Expense" : "Supprimer la dépense"', 'language === \'en\' ? "Delete Expense" : language === \'fr\' ? "Supprimer la dépense" : "حذف المصروف"'],
+  ['language === \'en\' ? "Update Expense" : "Mettre à jour"', 'language === \'en\' ? "Update Expense" : language === \'fr\' ? "Mettre à jour" : "تحديث المصروف"'],
+  ['language === \'en\' ? "All Members" : "Tous les membres"', 'language === \'en\' ? "All Members" : language === \'fr\' ? "Tous les membres" : "جميع الأعضاء"'],
+  ['language === \'en\' ? "All Categories" : "Toutes"', 'language === \'en\' ? "All Categories" : language === \'fr\' ? "Toutes" : "جميع الفئات"'],
+  ['language === \'en\' ? "Search expenses..." : "Rechercher une dépense..."', 'language === \'en\' ? "Search expenses..." : language === \'fr\' ? "Rechercher une dépense..." : "ابحث عن مصروف..."'],
+  ['language === \'en\' ? "Search tasks..." : "Rechercher une tâche..."', 'language === \'en\' ? "Search tasks..." : language === \'fr\' ? "Rechercher une tâche..." : "ابحث عن مهمة... "'],
+  ['language === \'en\' ? "Complete Task" : "Marquer Terminée"', 'language === \'en\' ? "Complete Task" : language === \'fr\' ? "Marquer Terminée" : "إكمال المهمة"'],
+  ['language === \'en\' ? "Update Task" : "Mettre à jour la tâche"', 'language === \'en\' ? "Update Task" : language === \'fr\' ? "Mettre à jour la tâche" : "تحيين المهمة"'],
+  ['language === \'en\' ? "Are you sure you want to delete this expense? This action cannot be undone." : "Êtes-vous sûr de vouloir supprimer cette dépense ? Cette action est irréversible."', 'language === \'en\' ? "Are you sure you want to delete this expense? This action cannot be undone." : language === \'fr\' ? "Êtes-vous sûr de vouloir supprimer cette dépense ? Cette action est irréversible." : "هل أنت متأكد أنك تريد حذف هذا المصروف؟ لا يمكن التراجع عن هذا الإجراء."'],
+  ['language === \'en\' ? "Are you sure you want to delete this task? This action cannot be undone." : "Êtes-vous sûr de vouloir supprimer cette tâche ? Cette action est irréversible."', 'language === \'en\' ? "Are you sure you want to delete this task? This action cannot be undone." : language === \'fr\' ? "Êtes-vous sûr de vouloir supprimer cette tâche ? Cette action est irréversible." : "هل أنت متأكد أنك تريد حذف هذه المهمة؟ لا يمكن التراجع عن هذا الإجراء."'],
+  ['language === \'en\' ? "View Attachments" : "Consulter les Pièces Jointes"', 'language === \'en\' ? "View Attachments" : language === \'fr\' ? "Consulter les Pièces Jointes" : "عرض المرفقات"'],
+  ['language === \'en\' ? "Attachment" : "Pièce jointe"', 'language === \'en\' ? "Attachment" : language === \'fr\' ? "Pièce jointe" : "مرفق"'],
+  ['language === \'en\' ? \'Select an expense to generate a document\' : \'Sélectionnez une dépense pour générer un document\'', 'language === \'en\' ? \'Select an expense to generate a document\' : language === \'fr\' ? \'Sélectionnez une dépense pour générer un document\' : \'حدد مصروفًا لإنشاء مستند\''],
+  ['language === \'en\' ? \'Generate\' : \'Générer\'', 'language === \'en\' ? \'Generate\' : language === \'fr\' ? \'Générer\' : \'إنشاء\''],
+  ['language === \'en\' ? "Print" : "Imprimer"', 'language === \'en\' ? "Print" : language === \'fr\' ? "Imprimer" : "طباعة"'],
+  ['language === \'en\' ? "Expense Documents" : "Documents relatifs aux dépenses"', 'language === \'en\' ? "Expense Documents" : language === \'fr\' ? "Documents relatifs aux dépenses" : "مستندات المصروفات"'],
+  ['language === \'en\' ? "Select an expense record to view and print physical documents such as purchase orders, cash vouchers, or receipts." : "Sélectionnez un historique pour consulter et imprimer des documents (bon de commande, reçu ...etc)."', 'language === \'en\' ? "Select an expense record to view and print physical documents such as purchase orders, cash vouchers, or receipts." : language === \'fr\' ? "Sélectionnez un historique pour consulter et imprimer des documents (bon de commande, reçu ...etc)." : "حدد سجل مصروف لعرض وطباعة المستندات المادية مثل طلبات الشراء، أو قسائم الدفع، أو الإيصالات."'],
+  ['language === \'en\' ? "Create Milestone" : "Nouveau jalon"', 'language === \'en\' ? "Create Milestone" : language === \'fr\' ? "Nouveau jalon" : "مرحلة جديدة"'],
+  ['language === \'en\' ? "No expenditures match your filters." : "Aucune dépense trouvée."', 'language === \'en\' ? "No expenditures match your filters." : language === \'fr\' ? "Aucune dépense trouvée." : "لم يتم العثور على أي نفقات."'],
+  ['language === \'en\' ? "No tasks match your filters." : "Aucune tâche trouvée."', 'language === \'en\' ? "No tasks match your filters." : language === \'fr\' ? "Aucune tâche trouvée." : "لم يتم العثور على أي مهام."'],
+  ['language === \'en\' ? "Project Name *" : "Nom du Chantier *"', 'language === \'en\' ? "Project Name *" : language === \'fr\' ? "Nom du Chantier *" : "اسم المشروع *"'],
+  ['language === \'en\' ? "Client/Owner" : "Client / Propriétaire"', 'language === \'en\' ? "Client/Owner" : language === \'fr\' ? "Client / Propriétaire" : "العميل / المالك"'],
+  ['language === \'en\' ? "Address" : "Adresse"', 'language === \'en\' ? "Address" : language === \'fr\' ? "Adresse" : "العنوان"'],
+  ['language === \'en\' ? "Description" : "Description"', 'language === \'en\' ? "Description" : language === \'fr\' ? "Description" : "الوصف"'],
+  ['language === \'en\' ? "Total Budget *" : "Budget Total *"', 'language === \'en\' ? "Total Budget *" : language === \'fr\' ? "Budget Total *" : "إجمالي الميزانية *"'],
+  ['language === \'en\' ? "Select phase..." : "Choisissez la phase..."', 'language === \'en\' ? "Select phase..." : language === \'fr\' ? "Choisissez la phase..." : "اختر المرحلة..."'],
+  ['language === \'en\' ? "Currency *" : "Devise *"', 'language === \'en\' ? "Currency *" : language === \'fr\' ? "Devise *" : "العملة *"'],
+  ['language === \'en\' ? "Task Goal / Title" : "Titre de la tâche"', 'language === \'en\' ? "Task Goal / Title" : language === \'fr\' ? "Titre de la tâche" : "عنوان المهمة / الهدف"'],
+  ['language === \'en\' ? "Optional details" : "Détails (facultatif)"', 'language === \'en\' ? "Optional details" : language === \'fr\' ? "Détails (facultatif)" : "تفاصيل (اختياري)"'],
+  ['language === \'en\' ? "Assign Partner..." : "Assigner à..."', 'language === \'en\' ? "Assign Partner..." : language === \'fr\' ? "Assigner à..." : "إسناد إلى..."'],
+  ['language === \'en\' ? "Status" : "Statut"', 'language === \'en\' ? "Status" : language === \'fr\' ? "Statut" : "الحالة"'],
+  ['language === \'en\' ? "Select an expense..." : "Sélectionner une dépense..."', 'language === \'en\' ? "Select an expense..." : language === \'fr\' ? "Sélectionner une dépense..." : "حدد مصروف... "'],
+  ['language === \'en\' ? "Document Type" : "Type de Document"', 'language === \'en\' ? "Document Type" : language === \'fr\' ? "Type de Document" : "نوع المستند"'],
+  ['language === \'en\' ? "Purchase Order" : "Bon de Commande"', 'language === \'en\' ? "Purchase Order" : language === \'fr\' ? "Bon de Commande" : "أمر شراء"'],
+  ['language === \'en\' ? "Cash Voucher" : "Bon de Caisse"', 'language === \'en\' ? "Cash Voucher" : language === \'fr\' ? "Bon de Caisse" : "إيصال نقدي"'],
+  ['language === \'en\' ? "Receipt" : "Reçu"', 'language === \'en\' ? "Receipt" : language === \'fr\' ? "Reçu" : "وصل استلام"'],
+  ['language === \'en\' ? "Invoice" : "Facture"', 'language === \'en\' ? "Invoice" : language === \'fr\' ? "Facture" : "فاتورة"'],
+];
+
+replacements.forEach(([search, replace]) => {
+  code = code.split(search).join(replace);
+});
+
+fs.writeFileSync('src/components/ProjectDetail.tsx', code, 'utf-8');
+console.log('Done!');
