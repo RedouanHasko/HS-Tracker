@@ -1,0 +1,316 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isDocOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function userEmail() {
+      return (request.auth != null && request.auth.token != null && request.auth.token.email != null)
+        ? request.auth.token.email.lower()
+        : '';
+    }
+
+    // ID validation to guard against ID poisoning
+    function isValidId(id) {
+      return id is string && id.size() <= 128;
+    }
+
+    // Helper to get safe string size
+    function valString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    // Entity validations
+    function isValidUserProfile(data) {
+      return data != null && ('fullName' in data ? valString(data.fullName, 200) : true);
+    }
+
+    function isValidProject(data) {
+      return data != null 
+          && ('id' in data ? valString(data.id, 128) : true)
+          && ('name' in data ? valString(data.name, 200) : true)
+          && ('creatorEmail' in data ? valString(data.creatorEmail, 200) : true)
+          && ('memberEmails' in data ? data.memberEmails is list : true);
+    }
+
+    function isValidInvitation(data) {
+      return data != null
+          && ('id' in data ? valString(data.id, 128) : true)
+          && ('projectId' in data ? valString(data.projectId, 128) : true)
+          && ('projectName' in data ? valString(data.projectName, 200) : true)
+          && ('ownerEmail' in data ? valString(data.ownerEmail, 200) : true)
+          && ('inviteeEmail' in data ? valString(data.inviteeEmail, 200) : true)
+          && ('status' in data ? valString(data.status, 50) : true);
+    }
+
+    // Projects: creator, accepted member, or pending invitee
+    function isInvitedToProject(projectData) {
+      return projectData != null
+          && 'invitedEmails' in projectData
+          && userEmail() in projectData.invitedEmails;
+    }
+
+    function isProjectMember(projectData) {
+      return projectData != null && (
+        ('creatorEmail' in projectData && projectData.creatorEmail.lower() == userEmail()) ||
+        ('memberEmails' in projectData && userEmail() in projectData.memberEmails) ||
+        isInvitedToProject(projectData)
+      );
+    }
+
+    function isProjectMemberById(projectId) {
+      let project = firestore.get(/databases/$(database)/documents/projects/$(projectId));
+      return project != null && isProjectMember(project.data);
+    }
+
+    // --- Role helpers (memberRoleByEmail denormalized on project save) ---
+    function callerRole(projectData) {
+      let email = userEmail();
+      return projectData != null
+          && 'creatorEmail' in projectData
+          && projectData.creatorEmail.lower() == email
+        ? 'owner'
+        : projectData != null
+            && 'memberRoleByEmail' in projectData
+            && email in projectData.memberRoleByEmail
+          ? projectData.memberRoleByEmail[email]
+          : projectData != null
+              && 'memberEmails' in projectData
+              && email in projectData.memberEmails
+            ? 'contributor'
+            : 'read_only';
+    }
+
+    function roleLevel(role) {
+      return role == 'owner' || role == 'co_owner' ? 4
+        : role == 'manager' ? 3
+        : role == 'editor' ? 2
+        : role == 'contributor' ? 1
+        : 0;
+    }
+
+    function membersUnchanged() {
+      return request.resource.data.members == resource.data.members
+        && request.resource.data.memberEmails == resource.data.memberEmails
+        && request.resource.data.memberRoleByEmail == resource.data.memberRoleByEmail
+        && (
+          !('invitedEmails' in resource.data)
+          || request.resource.data.invitedEmails == resource.data.invitedEmails
+        );
+    }
+
+    function projectSettingsUnchanged() {
+      return request.resource.data.name == resource.data.name
+        && request.resource.data.clientName == resource.data.clientName
+        && request.resource.data.address == resource.data.address
+        && request.resource.data.description == resource.data.description
+        && request.resource.data.budget == resource.data.budget
+        && request.resource.data.currency == resource.data.currency
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.startDate == resource.data.startDate
+        && request.resource.data.estimatedEndDate == resource.data.estimatedEndDate;
+    }
+
+    function expensesUnchanged() {
+      return request.resource.data.expenses == resource.data.expenses;
+    }
+
+    function reimbursementsUnchanged() {
+      return request.resource.data.reimbursements == resource.data.reimbursements;
+    }
+
+    function membersArrayUnchanged() {
+      return request.resource.data.members == resource.data.members;
+    }
+
+    function isContributorContentPatch() {
+      let patchKeys = request.resource.data.diff(resource.data).affectedKeys();
+      return membersArrayUnchanged()
+          && projectSettingsUnchanged()
+          && reimbursementsUnchanged()
+          && (
+            patchKeys.hasOnly(['expenses'])
+            || patchKeys.hasOnly(['tasks'])
+            || patchKeys.hasOnly(['photos'])
+            || patchKeys.hasOnly(['documents'])
+            || patchKeys.hasOnly(['sections'])
+            || patchKeys.hasOnly(['expenses', 'tasks'])
+            || patchKeys.hasOnly(['expenses', 'memberEmails', 'memberRoleByEmail'])
+            || patchKeys.hasOnly(['tasks', 'memberEmails', 'memberRoleByEmail'])
+            || patchKeys.hasOnly(['photos', 'memberEmails', 'memberRoleByEmail'])
+            || patchKeys.hasOnly(['documents', 'memberEmails', 'memberRoleByEmail'])
+            || patchKeys.hasOnly(['sections', 'memberEmails', 'memberRoleByEmail'])
+            || patchKeys.hasOnly(['expenses', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+            || patchKeys.hasOnly(['tasks', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+            || patchKeys.hasOnly(['photos', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+            || patchKeys.hasOnly(['documents', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+            || patchKeys.hasOnly(['sections', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+            || patchKeys.hasOnly(['expenses', 'tasks', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+            || isAccessListsSyncPatch()
+          );
+    }
+
+    // Sync denormalized access lists without changing project content (fixes media upload rules)
+    function isAccessListsSyncPatch() {
+      let patchKeys = request.resource.data.diff(resource.data).affectedKeys();
+      return membersArrayUnchanged()
+          && projectSettingsUnchanged()
+          && expensesUnchanged()
+          && reimbursementsUnchanged()
+          && patchKeys.hasOnly(['memberEmails', 'memberRoleByEmail', 'invitedEmails']);
+    }
+
+    function isAcceptedProjectMember(projectData) {
+      return projectData != null && (
+        ('creatorEmail' in projectData && projectData.creatorEmail.lower() == userEmail()) ||
+        ('memberEmails' in projectData && userEmail() in projectData.memberEmails)
+      );
+    }
+
+    function isAcceptedMemberByProjectId(projectId) {
+      let project = firestore.get(/databases/$(database)/documents/projects/$(projectId));
+      return project != null && isAcceptedProjectMember(project.data);
+    }
+
+    function isAdminRole(role) {
+      return role == 'owner' || role == 'co_owner' || role == 'manager';
+    }
+
+    // Pending invitee accepting or declining — may update members + access lists only
+    function isInviteeMembershipPatch() {
+      let patchKeys = request.resource.data.diff(resource.data).affectedKeys();
+      return isInvitedToProject(resource.data)
+          && (
+            patchKeys.hasOnly(['members', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+            || patchKeys.hasOnly(['members', 'memberRoleByEmail', 'invitedEmails'])
+          );
+    }
+
+    function canUpdateProjectByRole() {
+      let role = callerRole(resource.data);
+      let level = roleLevel(role);
+      return isAdminRole(role)
+        || isInviteeMembershipPatch()
+        || (level >= 1 && isContributorContentPatch());
+    }
+
+    function callerRoleByProjectId(projectId) {
+      let project = firestore.get(/databases/$(database)/documents/projects/$(projectId));
+      return project != null ? callerRole(project.data) : 'read_only';
+    }
+
+    function canWriteTaskMedia(projectId) {
+      return roleLevel(callerRoleByProjectId(projectId)) >= 1;
+    }
+
+    // Invitations: owner or target invitee
+    function isInvitationParty(inviteData) {
+      return inviteData != null && (
+        ('ownerEmail' in inviteData && inviteData.ownerEmail.lower() == userEmail()) ||
+        ('inviteeEmail' in inviteData && inviteData.inviteeEmail.lower() == userEmail())
+      );
+    }
+
+    // --- COLLECTION RULES ---
+
+    // 1. User Profiles
+    match /user_profiles/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isDocOwner(userId) && isValidUserProfile(request.resource.data);
+      allow update: if isDocOwner(userId) && isValidUserProfile(request.resource.data);
+      allow delete: if false;
+    }
+
+    // 2. Projects
+    match /projects/{projectId} {
+      allow get: if isSignedIn() && (resource == null || isProjectMember(resource.data));
+      allow list: if isSignedIn() && (resource == null || isProjectMember(resource.data));
+      
+      allow create: if isSignedIn() && isValidId(projectId) 
+          && request.resource.data.creatorEmail.lower() == userEmail()
+          && (userEmail() in request.resource.data.memberEmails)
+          && isValidProject(request.resource.data);
+          
+      allow update: if isSignedIn() && isProjectMember(resource.data)
+          && request.resource.data.creatorEmail.lower() == resource.data.creatorEmail.lower()
+          && isValidProject(request.resource.data)
+          && canUpdateProjectByRole();
+          
+      allow delete: if isSignedIn() && resource.data.creatorEmail.lower() == userEmail();
+    }
+
+    // 3. Invitations
+    match /invitations/{invitationId} {
+      allow get: if isSignedIn() && (resource == null || isInvitationParty(resource.data));
+      allow list: if isSignedIn() && (resource == null || ('inviteeEmail' in resource.data && resource.data.inviteeEmail.lower() == userEmail()));
+      
+      allow create: if isSignedIn() && isValidId(invitationId)
+          && request.resource.data.ownerEmail.lower() == userEmail()
+          && isValidInvitation(request.resource.data);
+          
+      allow update: if isSignedIn() && (
+        (resource.data.ownerEmail.lower() == userEmail() && isValidInvitation(request.resource.data)) ||
+        (resource.data.inviteeEmail.lower() == userEmail() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']))
+      );
+      
+      allow delete: if isSignedIn() && resource.data.ownerEmail.lower() == userEmail();
+    }
+
+    // 4. Timeline Activities — memberEmails denormalized for secure list queries
+    match /activities/{activityId} {
+      function canReadActivity() {
+        return isSignedIn()
+          && resource != null
+          && (
+            ('memberEmails' in resource.data && userEmail() in resource.data.memberEmails)
+            || isProjectMemberById(resource.data.projectId)
+          );
+      }
+
+      allow read: if canReadActivity();
+
+      allow create: if isSignedIn() && isValidId(activityId)
+        && isProjectMemberById(request.resource.data.projectId)
+        && roleLevel(callerRoleByProjectId(request.resource.data.projectId)) >= 1
+        && ('memberEmails' in request.resource.data)
+        && request.resource.data.memberEmails is list
+        && userEmail() in request.resource.data.memberEmails;
+
+      allow update, delete: if false;
+    }
+
+    // 5. User private nested paths (Notifications, Submissions, private profile)
+    match /users/{userId}/{document=**} {
+      allow read, write: if isDocOwner(userId);
+    }
+
+    // 6. Task media files (Spark plan — compressed images stored outside project doc)
+    match /project_task_media/{mediaId} {
+      allow read: if isSignedIn() && isAcceptedMemberByProjectId(resource.data.projectId);
+      allow create: if isSignedIn()
+        && isValidId(mediaId)
+        && request.resource.data.projectId is string
+        && isAcceptedMemberByProjectId(request.resource.data.projectId)
+        && canWriteTaskMedia(request.resource.data.projectId)
+        && (
+          !('sizeBytes' in request.resource.data)
+          || (
+            request.resource.data.sizeBytes is number
+            && request.resource.data.sizeBytes > 0
+            && request.resource.data.sizeBytes < 200000
+          )
+        );
+      allow delete: if isSignedIn()
+        && isAcceptedMemberByProjectId(resource.data.projectId)
+        && canWriteTaskMedia(resource.data.projectId);
+    }
+  }
+}

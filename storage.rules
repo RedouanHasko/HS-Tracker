@@ -1,0 +1,46 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function userEmail() {
+      return request.auth != null && request.auth.token.email != null
+        ? request.auth.token.email.lower()
+        : '';
+    }
+
+    function isProjectMember(projectId) {
+      let project = firestore.get(/databases/(default)/documents/projects/$(projectId));
+      return project != null && (
+        project.data.creatorEmail.lower() == userEmail() ||
+        userEmail() in project.data.memberEmails
+      );
+    }
+
+    function projectRoleLevel(projectId) {
+      let project = firestore.get(/databases/(default)/documents/projects/$(projectId));
+      if (project == null) return 0;
+      let email = userEmail();
+      let data = project.data;
+      if (data.creatorEmail.lower() == email) return 4;
+      if ('memberRoleByEmail' in data && email in data.memberRoleByEmail) {
+        let role = data.memberRoleByEmail[email];
+        return role == 'owner' || role == 'co_owner' ? 4
+          : role == 'manager' ? 3
+          : role == 'editor' ? 2
+          : role == 'contributor' ? 1
+          : 0;
+      }
+      if (email in data.memberEmails) return 1;
+      return 0;
+    }
+
+    // Task photos & attachments — members with write role only
+    match /projects/{projectId}/tasks/{taskId}/{category}/{fileName} {
+      allow read: if request.auth != null && isProjectMember(projectId);
+      allow write: if request.auth != null
+        && isProjectMember(projectId)
+        && projectRoleLevel(projectId) >= 1
+        && request.resource.size < 5 * 1024 * 1024;
+    }
+  }
+}

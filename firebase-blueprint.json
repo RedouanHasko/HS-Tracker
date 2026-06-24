@@ -1,0 +1,89 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile metadata",
+      "type": "object",
+      "properties": {
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string" },
+        "company": { "type": "string" },
+        "city": { "type": "string" },
+        "currency": { "type": "string" },
+        "avatarUrl": { "type": "string" }
+      }
+    },
+    "Project": {
+      "title": "Project",
+      "description": "A project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "creatorEmail": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "Project invitation details",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "projectName": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "inviteeEmail": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    "Activity": {
+      "title": "Activity",
+      "description": "A timeline activity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "userName": { "type": "string" },
+        "actionType": { "type": "string" },
+        "actionDetails": { "type": "string" },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "An app notification",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "read": { "type": "boolean" },
+        "type": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/user_profiles/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Global user directory lookup"
+    },
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "User projects"
+    },
+    "/invitations/{invitationId}": {
+      "schema": { "$ref": "#/entities/Invitation" },
+      "description": "Pending project invitations"
+    },
+    "/activities/{activityId}": {
+      "schema": { "$ref": "#/entities/Activity" },
+      "description": "Visual timeline activities logged"
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "Private in-app user notifications"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "HS Tracker",
+  "description": "A professional construction and renovation project management platform featuring multi-role access control, expense tracking, dynamic sections, interactive checklists, photo galleries, document storage, and template-based invoice, quote, and receipt generators. Optimized for DH (MAD) and other localized currencies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
