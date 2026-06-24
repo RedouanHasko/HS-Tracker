@@ -19,6 +19,8 @@ import {
   ArrowRight,
   Table,
   LayoutGrid,
+  Building,
+  KeyRound,
 } from 'lucide-react';
 import MobileDropdownMenu from './MobileDropdownMenu';
 import TopNavbar from './TopNavbar';
@@ -86,6 +88,11 @@ export default function Dashboard({
   const [budget, setBudget] = useState(100000);
   const [currency, setCurrency] = useState('DH');
   const [projectType, setProjectType] = useState<ProjectType>('construction');
+  // Rental-specific fields
+  const [rentalOwnerName, setRentalOwnerName] = useState('');
+  const [rentalBuildingNumber, setRentalBuildingNumber] = useState('');
+  const [rentalPricePerNight, setRentalPricePerNight] = useState(0);
+  const [rentalCommissionRate, setRentalCommissionRate] = useState<10 | 20>(10);
 
   const t = TRANSLATIONS[language];
 
@@ -172,7 +179,16 @@ export default function Dashboard({
         }
       ],
       photos: [],
-      documents: []
+      documents: [],
+      ...(projectType === 'rental' && {
+        rentalProperty: {
+          ownerName: rentalOwnerName,
+          buildingNumber: rentalBuildingNumber,
+          pricePerNight: rentalPricePerNight,
+          commissionRate: rentalCommissionRate,
+        },
+        rentalBookings: [],
+      }),
     };
 
     try {
@@ -204,6 +220,10 @@ export default function Dashboard({
       setBudget(100000);
       setCurrency('DH');
       setProjectType('construction');
+      setRentalOwnerName('');
+      setRentalBuildingNumber('');
+      setRentalPricePerNight(0);
+      setRentalCommissionRate(10);
       setShowCreateModal(false);
       
       // Dispatch storage (keep for backwards compat just in case)
@@ -299,6 +319,103 @@ export default function Dashboard({
       </AnimatePresence>
 
       <div className="mx-auto w-full max-w-7xl flex-1 px-4 pb-8 pt-6 sm:px-6 lg:px-8">
+        {projects.length === 0 ? (
+          /* Welcome Landing Page */
+          <div className="flex flex-col items-center justify-center min-h-[70vh] text-center px-4">
+            <div className="mb-8">
+              <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-sky-500 to-blue-600 shadow-lg shadow-sky-200 dark:shadow-sky-950 mb-5">
+                <span className="text-3xl font-bold text-white">HS</span>
+              </div>
+              <h1 className="text-3xl sm:text-4xl font-bold text-slate-900 dark:text-white mb-3 font-display">
+                {language === 'en' ? 'Welcome to HS Tracker' : language === 'fr' ? 'Bienvenue sur HS Tracker' : 'مرحباً بك في HS Tracker'}
+              </h1>
+              <p className="text-sm text-slate-500 dark:text-slate-400 max-w-lg mx-auto leading-relaxed">
+                {language === 'en'
+                  ? 'Manage your construction projects, services, and rental properties all in one place. Select a workspace type to get started.'
+                  : language === 'fr'
+                    ? 'Gérez vos projets de construction, services et locations en un seul endroit. Choisissez un type pour commencer.'
+                    : 'إدارة مشاريع البناء والخدمات والإيجارات في مكان واحد. اختر نوع مساحة العمل للبدء.'}
+              </p>
+            </div>
+
+            {/* Type Selection Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full max-w-3xl">
+              {/* Construction */}
+              <button
+                onClick={() => { setProjectType('construction'); setShowCreateModal(true); }}
+                className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-sky-400 dark:hover:border-sky-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
+              >
+                <div className="w-12 h-12 rounded-xl bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
+                  <Building className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+                </div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white mb-1">
+                  {language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {language === 'en'
+                    ? 'Track renovation budgets, expenses, tasks, and team collaboration for building projects.'
+                    : language === 'fr'
+                      ? 'Suivez les budgets, dépenses, tâches et collaboration pour vos chantiers.'
+                      : 'تتبع الميزانيات والمصروفات والمهام والتعاون الجماعي لمشاريع البناء.'}
+                </p>
+                <span className="inline-flex items-center gap-1 mt-3 text-xs font-semibold text-sky-600 dark:text-sky-400 group-hover:gap-1.5 transition-all">
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  {language === 'en' ? 'New Project' : language === 'fr' ? 'Nouveau Projet' : 'مشروع جديد'}
+                </span>
+              </button>
+
+              {/* Service */}
+              <button
+                onClick={() => { setProjectType('service'); setShowCreateModal(true); }}
+                className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-teal-400 dark:hover:border-teal-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
+              >
+                <div className="w-12 h-12 rounded-xl bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
+                  <Briefcase className="w-6 h-6 text-teal-600 dark:text-teal-400" />
+                </div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white mb-1">
+                  {language === 'en' ? 'Service' : language === 'fr' ? 'Service' : 'خدمة'}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {language === 'en'
+                    ? 'Manage services, maintenance tasks, and expenses without needing a budget upfront.'
+                    : language === 'fr'
+                      ? 'Gérez les services, tâches de maintenance et dépenses sans budget initial.'
+                      : 'إدارة الخدمات ومهام الصيانة والمصروفات بدون الحاجة لميزانية مسبقة.'}
+                </p>
+                <span className="inline-flex items-center gap-1 mt-3 text-xs font-semibold text-teal-600 dark:text-teal-400 group-hover:gap-1.5 transition-all">
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  {language === 'en' ? 'New Service' : language === 'fr' ? 'Nouveau Service' : 'خدمة جديدة'}
+                </span>
+              </button>
+
+              {/* Rental */}
+              <button
+                onClick={() => { setProjectType('rental'); setShowCreateModal(true); }}
+                className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-purple-400 dark:hover:border-purple-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
+              >
+                <div className="w-12 h-12 rounded-xl bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
+                  <KeyRound className="w-6 h-6 text-purple-600 dark:text-purple-400" />
+                </div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white mb-1">
+                  {language === 'en' ? 'Rental' : language === 'fr' ? 'Location' : 'إيجار'}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {language === 'en'
+                    ? 'Manage apartments, villas bookings, owner payouts, commissions, and guest info.'
+                    : language === 'fr'
+                      ? 'Gérez les réservations, commissions, paiements propriétaires et infos clients.'
+                      : 'إدارة حجوزات الشقق والفيلات والعمولات ومعلومات النزلاء.'}
+                </p>
+                <span className="inline-flex items-center gap-1 mt-3 text-xs font-semibold text-purple-600 dark:text-purple-400 group-hover:gap-1.5 transition-all">
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  {language === 'en' ? 'New Rental' : language === 'fr' ? 'Nouvelle Location' : 'إيجار جديد'}
+                </span>
+              </button>
+            </div>
+          </div>
+        ) : (
+        /* Existing Dashboard Content */
+        <>
         {/* Page intro */}
         <p className="mb-6 max-w-2xl text-sm text-slate-500 dark:text-slate-400">
           {language === 'en'
@@ -739,6 +856,8 @@ export default function Dashboard({
           </div>
         </div>
       </div>
+      </>
+      )}
       </div>
 
       {/* New Project Dialog Modal (Shadcn style with dark mode overlay) */}
@@ -835,6 +954,61 @@ export default function Dashboard({
                     <option value="rental">{t.projectTypes.rental}</option>
                   </select>
                 </div>
+                {projectType === 'rental' ? (
+                  <>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                        {language === 'en' ? 'Owner Name' : language === 'fr' ? 'Nom du propriétaire' : 'اسم المالك'}
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={rentalOwnerName}
+                        onChange={(e) => setRentalOwnerName(e.target.value)}
+                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                        {language === 'en' ? 'Building / Apt #' : language === 'fr' ? 'Bâtiment / Appartement' : 'رقم المبنى / الشقة'}
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={rentalBuildingNumber}
+                        onChange={(e) => setRentalBuildingNumber(e.target.value)}
+                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                        {language === 'en' ? 'Price per Night (DH)' : language === 'fr' ? 'Prix par nuit (DH)' : 'السعر لليلة (درهم)'}
+                      </label>
+                      <input
+                        type="number"
+                        required
+                        min={0}
+                        value={rentalPricePerNight || ''}
+                        onChange={(e) => setRentalPricePerNight(Number(e.target.value))}
+                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                        {language === 'en' ? 'Commission Rate' : language === 'fr' ? 'Taux de commission' : 'نسبة العمولة'}
+                      </label>
+                      <select
+                        value={rentalCommissionRate}
+                        onChange={(e) => setRentalCommissionRate(Number(e.target.value) as 10 | 20)}
+                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 font-semibold"
+                      >
+                        <option value={10}>10%</option>
+                        <option value={20}>20%</option>
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <>
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                     {language === 'en' ? 'Budget Limit' : language === 'fr' ? 'Limite du Budget' : 'الحد الأقصى للميزانية'}
@@ -865,6 +1039,7 @@ export default function Dashboard({
                     <option value="GBP">Pound Sterling (£)</option>
                   </select>
                 </div>
+                </>)}
               </div>
 
               <div>

@@ -162,6 +162,32 @@ export interface Reimbursement {
   date: string;
 }
 
+export type RentalBookingStatus = 'upcoming' | 'active' | 'completed' | 'cancelled';
+
+export interface RentalProperty {
+  ownerName: string;
+  buildingNumber: string;
+  pricePerNight: number;
+  commissionRate: 10 | 20;
+}
+
+export interface RentalBooking {
+  id: string;
+  clientName: string;
+  clientPhone: string;
+  numberOfGuests: number;
+  checkIn: string;
+  checkOut: string;
+  totalNights: number;
+  totalAmount: number;
+  commission: number;
+  ownerPayout: number;
+  status: RentalBookingStatus;
+  notes?: string;
+  paidAmount: number;
+  balanceDue: number;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -182,6 +208,8 @@ export interface Project {
   photos: Photo[];
   documents: Document[];
   reimbursements?: Reimbursement[];
+  rentalProperty?: RentalProperty;
+  rentalBookings?: RentalBooking[];
   /** Accepted members — used for Firestore queries and read access */
   memberEmails?: string[];
   /** Pending invitees — read + accept/decline only (not full member until accepted) */
@@ -242,7 +270,7 @@ export type NotificationCategory =
 /** Where to navigate when the user clicks a notification */
 export interface NotificationAction {
   projectId?: string;
-  tab?: 'overview' | 'expenses' | 'tasks' | 'docs';
+  tab?: 'overview' | 'expenses' | 'tasks' | 'docs' | 'rental';
   taskId?: string;
   invitationId?: string;
   highlightInvitation?: boolean;

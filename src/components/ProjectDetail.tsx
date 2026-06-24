@@ -58,6 +58,8 @@ import {
   PendingNotificationNav,
   TaskMedia,
   ProjectType,
+  RentalBooking,
+  RentalBookingStatus,
 } from '../types';
 import { TRANSLATIONS, calculateSettlements } from '../utils/mockData';
 import {
@@ -151,7 +153,7 @@ export default function ProjectDetail({
   const [projectActivities, setProjectActivities] = useState<TimelineActivity[]>([]);
   
   // Tab Switcher state
-  const [activeTab, setActiveTab] = useState<'overview' | 'expenses' | 'tasks' | 'docs'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'expenses' | 'tasks' | 'docs' | 'rental'>('overview');
 
   // Modal displays
   const [showAddExpense, setShowAddExpense] = useState(false);
@@ -1599,6 +1601,19 @@ export default function ProjectDetail({
         >
           {language === 'en' ? 'Invoices & Vouchers' : language === 'fr' ? 'Factures & Bons' : 'فواتير وإيصالات'}
         </button>
+        {project?.projectType === 'rental' && (
+        <button
+          id="project-tab-rental"
+          onClick={() => setActiveTab('rental')}
+          className={`pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+            activeTab === 'rental' 
+              ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
+              : 'border-transparent text-slate-450 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+          } ${aiFocusId === 'project-tab-rental' ? 'project-tab-ai-focus' : ''}`}
+        >
+          {language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'الإيجارات'}
+        </button>
+        )}
       </div>
 
       <AnimatePresence mode="wait">
@@ -2762,6 +2777,86 @@ export default function ProjectDetail({
         </div>
         </FadeIn>
       )}
+
+      {/* TAB CONTENT: RENTAL MANAGEMENT */}
+      {activeTab === 'rental' && project && (
+        <FadeIn key="rental">
+        <div className="space-y-6">
+          {/* Property Summary Card */}
+          {project.rentalProperty && (
+            <div className="rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50/40 dark:bg-purple-950/30 p-5">
+              <div className="flex items-start justify-between flex-wrap gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <Building className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                    {project.rentalProperty.buildingNumber}
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    {t.rental.ownerName}: {project.rentalProperty.ownerName}
+                  </p>
+                </div>
+                <div className="flex items-center gap-4 text-xs">
+                  <div className="text-right">
+                    <p className="text-slate-400 text-[10px] uppercase tracking-wider font-bold">{t.rental.pricePerNight}</p>
+                    <p className="font-bold text-slate-900 dark:text-white">{project.rentalProperty.pricePerNight} {project.currency}<span className="font-normal text-slate-400">/{t.rental.nights}</span></p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-slate-400 text-[10px] uppercase tracking-wider font-bold">{t.rental.commissionRate}</p>
+                    <p className="font-bold text-slate-900 dark:text-white">{project.rentalProperty.commissionRate}%</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Revenue Summary */}
+          {project.rentalBookings && project.rentalBookings.length > 0 && (
+            <div className="grid grid-cols-3 gap-3">
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.totalRevenue}</p>
+                <p className="text-lg font-bold text-slate-900 dark:text-white mt-1">
+                  {project.rentalBookings.reduce((s, b) => s + b.totalAmount, 0)} {project.currency}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.totalCommission}</p>
+                <p className="text-lg font-bold text-emerald-600 dark:text-emerald-400 mt-1">
+                  +{project.rentalBookings.reduce((s, b) => s + b.commission, 0)} {project.currency}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.totalPayout}</p>
+                <p className="text-lg font-bold text-slate-900 dark:text-white mt-1">
+                  {project.rentalBookings.reduce((s, b) => s + b.ownerPayout, 0)} {project.currency}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Add Booking Form */}
+          <RentalBookingForm
+            project={project}
+            language={language}
+            t={t}
+            onSave={async (updatedProject) => {
+              setProject(updatedProject);
+              if (user) await saveProjectToDB(user.uid, updatedProject);
+            }}
+          />
+
+          {/* Bookings List */}
+          <RentalBookingList
+            project={project}
+            language={language}
+            t={t}
+            onUpdate={async (updatedProject) => {
+              setProject(updatedProject);
+              if (user) await saveProjectToDB(user.uid, updatedProject);
+            }}
+          />
+        </div>
+        </FadeIn>
+      )}
       </AnimatePresence>
 
       </div>
@@ -3408,6 +3503,232 @@ export default function ProjectDetail({
         projectName={project.name}
       />
 
+    </div>
+  );
+}
+
+/* ─── Rental Booking Form ─── */
+function RentalBookingForm({ project, language, t, onSave }: {
+  project: Project;
+  language: Language;
+  t: any;
+  onSave: (p: Project) => Promise<void>;
+}) {
+  const [showForm, setShowForm] = useState(false);
+  const [guestName, setGuestName] = useState('');
+  const [guestPhone, setGuestPhone] = useState('');
+  const [checkIn, setCheckIn] = useState('');
+  const [checkOut, setCheckOut] = useState('');
+  const [numGuests, setNumGuests] = useState(1);
+
+  if (!project.rentalProperty) return null;
+
+  const ppn = project.rentalProperty.pricePerNight;
+  const rate = project.rentalProperty.commissionRate;
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!guestName.trim() || !checkIn || !checkOut) return;
+    const ci = new Date(checkIn);
+    const co = new Date(checkOut);
+    const nights = Math.max(1, Math.round((co.getTime() - ci.getTime()) / (1000 * 60 * 60 * 24)));
+    const total = nights * ppn;
+    const commission = Math.round(total * rate / 100);
+    const payout = total - commission;
+
+    const booking: RentalBooking = {
+      id: `book_${Date.now()}`,
+      clientName: guestName,
+      clientPhone: guestPhone,
+      numberOfGuests: numGuests,
+      checkIn,
+      checkOut,
+      totalNights: nights,
+      totalAmount: total,
+      commission,
+      ownerPayout: payout,
+      status: 'upcoming',
+      paidAmount: 0,
+      balanceDue: total,
+    };
+
+    const updated: Project = {
+      ...project,
+      rentalBookings: [...(project.rentalBookings || []), booking],
+    };
+    await onSave(updated);
+    setGuestName('');
+    setGuestPhone('');
+    setCheckIn('');
+    setCheckOut('');
+    setNumGuests(1);
+    setShowForm(false);
+  };
+
+  if (!showForm) {
+    return (
+      <button
+        onClick={() => setShowForm(true)}
+        className="w-full py-3 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:border-slate-400 dark:hover:border-slate-600 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer"
+      >
+        <div className="flex items-center justify-center gap-2">
+          <Plus className="w-4 h-4" />
+          {t.rental.addBooking}
+        </div>
+      </button>
+    );
+  }
+
+  const nights = checkIn && checkOut ? Math.max(1, Math.round((new Date(checkOut).getTime() - new Date(checkIn).getTime()) / (1000 * 60 * 60 * 24))) : 0;
+  const previewTotal = nights * ppn;
+  const previewCommission = Math.round(previewTotal * rate / 100);
+
+  return (
+    <form onSubmit={handleAdd} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
+      <div className="flex justify-between items-center">
+        <h4 className="text-xs font-bold text-slate-900 dark:text-white">{t.rental.addBooking}</h4>
+        <button type="button" onClick={() => setShowForm(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer p-1">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.clientName}</label>
+          <input required type="text" value={guestName} onChange={e => setGuestName(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.clientPhone}</label>
+          <input type="text" value={guestPhone} onChange={e => setGuestPhone(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.checkIn}</label>
+          <input required type="date" value={checkIn} onChange={e => setCheckIn(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono" />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.checkOut}</label>
+          <input required type="date" value={checkOut} onChange={e => setCheckOut(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono" />
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.numberOfGuests}</label>
+          <input type="number" min={1} value={numGuests} onChange={e => setNumGuests(Math.max(1, Number(e.target.value)))} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
+        </div>
+      </div>
+      {nights > 0 && (
+        <div className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-950/50 rounded-lg p-3 space-y-1">
+          <div className="flex justify-between"><span>{nights} {t.rental.nights} × {ppn} {project.currency}</span><span>{previewTotal} {project.currency}</span></div>
+          <div className="flex justify-between"><span>{t.rental.commission} ({rate}%)</span><span className="text-emerald-600 dark:text-emerald-400">-{previewCommission} {project.currency}</span></div>
+          <div className="flex justify-between font-bold border-t border-slate-200 dark:border-slate-800 pt-1 mt-1"><span>{t.rental.ownerPayout}</span><span>{previewTotal - previewCommission} {project.currency}</span></div>
+        </div>
+      )}
+      <div className="flex justify-end gap-2 pt-1">
+        <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 cursor-pointer">{language === 'en' ? 'Cancel' : language === 'fr' ? 'Annuler' : 'إلغاء'}</button>
+        <button type="submit" className="px-4 py-2 rounded-lg text-xs font-semibold bg-purple-600 hover:bg-purple-700 text-white cursor-pointer shadow-sm">{t.rental.addBooking}</button>
+      </div>
+    </form>
+  );
+}
+
+/* ─── Rental Booking List ─── */
+function RentalBookingList({ project, language, t, onUpdate }: {
+  project: Project;
+  language: Language;
+  t: any;
+  onUpdate: (p: Project) => Promise<void>;
+}) {
+  const bookings = project.rentalBookings || [];
+
+  if (bookings.length === 0) {
+    return (
+      <div className="text-center py-12 text-slate-400 text-xs">
+        <Building className="w-8 h-8 mx-auto mb-2 opacity-40" />
+        <p>{t.rental.noBookings}</p>
+      </div>
+    );
+  }
+
+  const statusColors: Record<string, string> = {
+    upcoming: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+    active: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+    completed: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+    cancelled: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  };
+
+  const statusLabels: Record<string, string> = {
+    upcoming: t.rental.statuses.upcoming,
+    active: t.rental.statuses.active,
+    completed: t.rental.statuses.completed,
+    cancelled: t.rental.statuses.cancelled,
+  };
+
+  const handleStatusChange = async (bookingId: string, newStatus: RentalBookingStatus) => {
+    const updated: Project = {
+      ...project,
+      rentalBookings: (project.rentalBookings || []).map(b =>
+        b.id === bookingId ? { ...b, status: newStatus } : b
+      ),
+    };
+    await onUpdate(updated);
+  };
+
+  const handleDelete = async (bookingId: string) => {
+    const updated: Project = {
+      ...project,
+      rentalBookings: (project.rentalBookings || []).filter(b => b.id !== bookingId),
+    };
+    await onUpdate(updated);
+  };
+
+  const sorted = [...bookings].sort((a, b) => a.checkIn.localeCompare(b.checkIn));
+
+  return (
+    <div className="space-y-2">
+      <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+        <Calendar className="w-4 h-4" />
+        {t.rental.bookings} ({bookings.length})
+      </h4>
+      {sorted.map(b => (
+        <div key={b.id} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-sm font-bold text-slate-900 dark:text-white">{b.clientName}</p>
+                {b.clientPhone && <span className="text-[10px] text-slate-400">{b.clientPhone}</span>}
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${statusColors[b.status]}`}>
+                  {statusLabels[b.status]}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 mt-1.5 text-xs text-slate-500 dark:text-slate-400 flex-wrap">
+                <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />{b.checkIn} → {b.checkOut}</span>
+                <span>{b.totalNights} {t.rental.nights}</span>
+                <span className="flex items-center gap-1"><UserIcon className="w-3 h-3" />{b.numberOfGuests} {b.numberOfGuests > 1 ? (language === 'en' ? 'guests' : language === 'fr' ? 'invités' : 'ضيوف') : (language === 'en' ? 'guest' : language === 'fr' ? 'invité' : 'ضيف')}</span>
+              </div>
+            </div>
+            <div className="text-right text-xs">
+              <p className="font-bold text-slate-900 dark:text-white">{b.totalAmount} {project.currency}</p>
+              <p className="text-emerald-600 dark:text-emerald-400 text-[10px]">{t.rental.commission}: +{b.commission} {project.currency}</p>
+              <p className="text-slate-400 text-[10px]">{t.rental.ownerPayout}: {b.ownerPayout} {project.currency}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 mt-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+            <select
+              value={b.status}
+              onChange={e => handleStatusChange(b.id, e.target.value as RentalBookingStatus)}
+              className="text-[10px] px-2 py-1 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none cursor-pointer"
+            >
+              <option value="upcoming">{t.rental.statuses.upcoming}</option>
+              <option value="active">{t.rental.statuses.active}</option>
+              <option value="completed">{t.rental.statuses.completed}</option>
+              <option value="cancelled">{t.rental.statuses.cancelled}</option>
+            </select>
+            <button
+              onClick={() => handleDelete(b.id)}
+              className="text-[10px] text-red-500 hover:text-red-700 dark:hover:text-red-400 px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors cursor-pointer"
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
