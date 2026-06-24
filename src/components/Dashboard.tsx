@@ -77,6 +77,10 @@ export default function Dashboard({
   const [viewMode, setViewMode] = useState<'table' | 'cards'>(() => {
     return (localStorage.getItem("buildtrack_view_mode") as 'table' | 'cards') || 'table';
   });
+  // Welcome page state — show on first visit until dismissed
+  const [showWelcome, setShowWelcome] = useState(() => {
+    return localStorage.getItem("hs_tracker_welcome_dismissed") !== 'true';
+  });
   
   // Create New Project Form States
   const [projName, setProjName] = useState('');
@@ -130,6 +134,10 @@ export default function Dashboard({
   };
 
   // Add new project
+  const dismissWelcome = () => {
+    setShowWelcome(false);
+    localStorage.setItem("hs_tracker_welcome_dismissed", 'true');
+  };
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!projName.trim() || !user?.uid || !user.email) return;
@@ -225,6 +233,7 @@ export default function Dashboard({
       setRentalPricePerNight(0);
       setRentalCommissionRate(10);
       setShowCreateModal(false);
+      dismissWelcome();
       
       // Dispatch storage (keep for backwards compat just in case)
       window.dispatchEvent(new Event('storage'));
@@ -318,7 +327,7 @@ export default function Dashboard({
         )}
       </AnimatePresence>
 
-      {projects.length === 0 ? (
+      {showWelcome ? (
         /* Welcome Landing Page — Full bleed outside the container */
         <div className="flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)] text-center px-4 sm:px-6 -mt-14 pt-14 bg-gradient-to-b from-white via-slate-50/80 to-slate-50/40 dark:from-[#121212] dark:via-[#1a1a2e] dark:to-[#121212]">
           <div className="mb-8">
@@ -341,7 +350,7 @@ export default function Dashboard({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full max-w-3xl">
             {/* Construction */}
             <button
-              onClick={() => { setProjectType('construction'); setShowCreateModal(true); }}
+              onClick={() => { dismissWelcome(); setProjectType('construction'); setShowCreateModal(true); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-sky-400 dark:hover:border-sky-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
               <div className="w-12 h-12 rounded-xl bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
@@ -365,7 +374,7 @@ export default function Dashboard({
 
             {/* Service */}
             <button
-              onClick={() => { setProjectType('service'); setShowCreateModal(true); }}
+              onClick={() => { dismissWelcome(); setProjectType('service'); setShowCreateModal(true); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-teal-400 dark:hover:border-teal-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
               <div className="w-12 h-12 rounded-xl bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
@@ -389,7 +398,7 @@ export default function Dashboard({
 
             {/* Rental */}
             <button
-              onClick={() => { setProjectType('rental'); setShowCreateModal(true); }}
+              onClick={() => { dismissWelcome(); setProjectType('rental'); setShowCreateModal(true); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-purple-400 dark:hover:border-purple-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
               <div className="w-12 h-12 rounded-xl bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
@@ -411,6 +420,12 @@ export default function Dashboard({
               </span>
             </button>
           </div>
+          <button
+            onClick={dismissWelcome}
+            className="mt-8 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 underline underline-offset-2 transition-colors cursor-pointer"
+          >
+            {language === 'en' ? 'Skip to Dashboard →' : language === 'fr' ? 'Passer au tableau de bord →' : 'تخطي إلى لوحة التحكم ←'}
+          </button>
         </div>
       ) : (
         <div className="mx-auto w-full max-w-7xl flex-1 px-4 pb-8 pt-6 sm:px-6 lg:px-8">
