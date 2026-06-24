@@ -49,7 +49,7 @@ interface DashboardProps {
   sidebarToggleLabel?: string;
   unreadCount?: number;
   onToggleNotifications?: () => void;
-  onOpenRentalDashboard?: () => void;
+  workspaceType?: 'construction' | 'service';
 }
 
 export default function Dashboard({ 
@@ -63,7 +63,7 @@ export default function Dashboard({
   sidebarToggleLabel = 'Toggle sidebar',
   unreadCount = 0,
   onToggleNotifications,
-  onOpenRentalDashboard,
+  workspaceType,
 }: DashboardProps) {
   const { user } = useAuth();
   // Database States
@@ -250,8 +250,9 @@ export default function Dashboard({
     return sum + p.tasks.filter(t => t.status !== 'completed').length;
   }, 0);
 
-  // Filter projects by search query
+  // Filter projects by workspace type and search query
   const filteredProjects = projects.filter(project => {
+    if (workspaceType && project.projectType !== workspaceType) return false;
     const query = searchQuery.toLowerCase();
     
     // Search in project metadata
@@ -430,17 +431,9 @@ export default function Dashboard({
           <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 cursor-default">
             <Building className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}
           </span>
-          <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 cursor-default">
-            <Briefcase className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Services' : language === 'fr' ? 'Services' : 'خدمات'}
-          </span>
-          {onOpenRentalDashboard && (
-            <button
-              onClick={onOpenRentalDashboard}
-              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-all cursor-pointer"
-            >
-              <KeyRound className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'الإيجارات'}
-            </button>
-          )}
+            <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 cursor-default">
+              <Briefcase className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Services' : language === 'fr' ? 'Services' : 'خدمات'}
+            </span>
         </div>
 
       {/* Bento Grid Highlights Statistics (Shadcn KPI Cards) */}
@@ -572,16 +565,6 @@ export default function Dashboard({
                 <span className="hidden sm:inline">{language === 'en' ? 'Cards' : language === 'fr' ? 'Cartes' : 'كروت'}</span>
               </button>
             </div>
-
-            {onOpenRentalDashboard && (
-              <button
-                onClick={onOpenRentalDashboard}
-                className="ml-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-all cursor-pointer"
-              >
-                <KeyRound className="w-3.5 h-3.5" />
-                <span>{language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'الإيجارات'}</span>
-              </button>
-            )}
           </div>
 
           {searchQuery && (

@@ -13,7 +13,9 @@ import {
   X,
   FileText,
   Sliders,
-  LogOut
+  LogOut,
+  Building,
+  KeyRound,
 } from 'lucide-react';
 import { initializeDB, getLanguage, saveLanguage } from './utils/mockData';
 import { saveProjectToDB, subscribeToProjects, registerUserProfileIfNeeded } from './lib/db';
@@ -21,6 +23,7 @@ import { Language, Project } from './types';
 import Dashboard from './components/Dashboard';
 import ProjectDetail from './components/ProjectDetail';
 import RentalDashboard from './components/RentalDashboard';
+import WelcomePage from './components/WelcomePage';
 import ProfileModal from './components/ProfileModal';
 import NotificationsPanel from './components/NotificationsPanel';
 import { HSLogo } from './components/HSLogo';
@@ -121,7 +124,7 @@ export default function App() {
   const { user, signOut } = useAuth();
   const { page, modal, modalVariants, overlayVariants, overlay } = useMotionConfig();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<'dashboard' | 'rental'>('dashboard');
+  const [currentView, setCurrentView] = useState<'welcome' | 'construction' | 'service' | 'rental'>('welcome');
   const [language, setLanguage] = useState<Language>('en');
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   
@@ -343,7 +346,7 @@ export default function App() {
       budget: Number(budget) || 10000,
       currency: currency || 'DH',
       status: 'planning',
-      projectType: 'construction',
+      projectType: currentView === 'construction' ? 'construction' : 'service',
       creatorEmail: ownerEmail,
       members: [
         { email: ownerEmail, name: user.displayName || 'Owner', role: 'owner', status: 'accepted' }
@@ -391,9 +394,14 @@ export default function App() {
     setShowAddModal(false);
   };
 
-  const filteredPages = projects.filter(p => p.name.toLowerCase().includes(sidebarFilter.toLowerCase()));
+  const filteredPages = projects.filter(p => p.projectType === currentView && p.name.toLowerCase().includes(sidebarFilter.toLowerCase()));
 
-  return (
+  return currentView === 'welcome' ? (
+    <WelcomePage
+      language={language}
+      onSelectType={(type) => setCurrentView(type)}
+    />
+  ) : (
     <div className={`flex min-h-screen text-slate-800 dark:text-slate-100 bg-slate-50/40 dark:bg-[#121212] transition-colors duration-350 font-sans ${theme === 'dark' ? 'dark' : ''}`}>
       
       {/* Backdrop when sidebar is open on mobile / tablet */}
@@ -425,19 +433,21 @@ export default function App() {
         <div className={`flex h-full w-64 flex-col justify-between transition-opacity duration-[280ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${sidebarOpen ? 'opacity-100' : 'pointer-events-none opacity-0 lg:invisible'}`}>
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between border-b border-slate-100 bg-slate-100/30 px-4 py-3.5 dark:border-slate-900 dark:bg-slate-950/20">
-              <div className="flex max-w-[80%] items-center gap-2 truncate">
-                <div className="shrink-0">
-                  <HSLogo className="h-8 w-8" compact />
+                <div className="flex max-w-[80%] items-center gap-2 truncate">
+                  <div className="shrink-0">
+                    <HSLogo className="h-8 w-8" compact />
+                  </div>
+                  <div className="truncate">
+                    <span className="block truncate font-sans text-[12.5px] font-bold leading-none tracking-tight text-slate-900 dark:text-slate-105">
+                      HS Tracker
+                    </span>
+                    <span className="mt-0.5 block truncate font-mono text-[9.5px] tracking-wide flex items-center gap-1">
+                      {currentView === 'construction' && <><Building className="w-3 h-3 text-sky-500" /><span className="text-sky-500">{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}</span></>}
+                      {currentView === 'rental' && <><KeyRound className="w-3 h-3 text-purple-500" /><span className="text-purple-500">{language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'إيجارات'}</span></>}
+                      {currentView === 'service' && <><Briefcase className="w-3 h-3 text-teal-500" /><span className="text-teal-500">{language === 'en' ? 'Services' : language === 'fr' ? 'Services' : 'خدمات'}</span></>}
+                    </span>
+                  </div>
                 </div>
-                <div className="truncate">
-                  <span className="block truncate font-sans text-[12.5px] font-bold leading-none tracking-tight text-slate-900 dark:text-slate-105">
-                    HS Tracker
-                  </span>
-                  <span className="mt-0.5 block truncate font-mono text-[9.5px] tracking-wide text-slate-400">
-                    {sf.civilEngineer}
-                  </span>
-                </div>
-              </div>
               <button
                 type="button"
                 onClick={() => setSidebarOpen(false)}
@@ -452,7 +462,7 @@ export default function App() {
             {/* Quick Core Actions Menu */}
             <div className="px-3 py-3 border-b border-slate-100 dark:border-slate-900/40 space-y-1.5 font-sans">
               <button
-                onClick={() => handleSelectProject(null)}
+                onClick={() => { setSelectedProjectId(null); }}
                 className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
                   selectedProjectId === null 
                     ? 'bg-slate-200/50 dark:bg-slate-850/80 text-sky-600 dark:text-sky-400' 
@@ -470,6 +480,14 @@ export default function App() {
               >
                 <Plus className="w-4 h-4 opacity-80 text-sky-500" />
                 <span>{sf.newWorkspace}</span>
+              </button>
+
+              <button
+                onClick={() => setCurrentView('welcome')}
+                className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
+              >
+                <span className="text-[10px] opacity-70">⌂</span>
+                <span>{language === 'en' ? 'Switch Workspace' : language === 'fr' ? 'Changer d\'espace' : 'تبديل مساحة العمل'}</span>
               </button>
             </div>
 
@@ -597,7 +615,7 @@ export default function App() {
       <main className="relative flex min-h-screen min-w-0 flex-1 flex-col overflow-x-hidden">
         <div className="flex-1">
           <AnimatePresence mode="wait">
-            {activeView === 'rental' ? (
+            {currentView === 'rental' && !selectedProjectId ? (
               <motion.div
                 key="rental-dashboard"
                 initial={{ opacity: 0, y: 6 }}
@@ -612,7 +630,7 @@ export default function App() {
                   onLanguageChange={handleLanguageChange}
                   theme={theme}
                   onThemeToggle={handleThemeToggle}
-                  onBack={() => setActiveView('dashboard')}
+                  onBack={() => setCurrentView('welcome')}
                   sidebarOpen={sidebarOpen}
                   onToggleSidebar={toggleSidebar}
                   sidebarToggleLabel={sidebarOpen ? sf.collapse : sf.expand}
@@ -646,7 +664,7 @@ export default function App() {
                     setShowNotifications((open) => !open);
                     setHighlightInvitationId(null);
                   }}
-                  onOpenRentalDashboard={() => setActiveView('rental')}
+                  workspaceType={currentView === 'rental' ? undefined : currentView}
                 />
               </motion.div>
             ) : (
