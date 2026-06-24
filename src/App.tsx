@@ -20,6 +20,7 @@ import { saveProjectToDB, subscribeToProjects, registerUserProfileIfNeeded } fro
 import { Language, Project } from './types';
 import Dashboard from './components/Dashboard';
 import ProjectDetail from './components/ProjectDetail';
+import RentalDashboard from './components/RentalDashboard';
 import ProfileModal from './components/ProfileModal';
 import NotificationsPanel from './components/NotificationsPanel';
 import { HSLogo } from './components/HSLogo';
@@ -120,6 +121,7 @@ export default function App() {
   const { user, signOut } = useAuth();
   const { page, modal, modalVariants, overlayVariants, overlay } = useMotionConfig();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<'dashboard' | 'rental'>('dashboard');
   const [language, setLanguage] = useState<Language>('en');
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   
@@ -595,7 +597,33 @@ export default function App() {
       <main className="relative flex min-h-screen min-w-0 flex-1 flex-col overflow-x-hidden">
         <div className="flex-1">
           <AnimatePresence mode="wait">
-            {!selectedProjectId ? (
+            {activeView === 'rental' ? (
+              <motion.div
+                key="rental-dashboard"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={page}
+                className="transform-gpu"
+              >
+                <RentalDashboard
+                  onSelectProject={(id) => handleSelectProject(id)}
+                  language={language}
+                  onLanguageChange={handleLanguageChange}
+                  theme={theme}
+                  onThemeToggle={handleThemeToggle}
+                  onBack={() => setActiveView('dashboard')}
+                  sidebarOpen={sidebarOpen}
+                  onToggleSidebar={toggleSidebar}
+                  sidebarToggleLabel={sidebarOpen ? sf.collapse : sf.expand}
+                  unreadCount={unreadCount}
+                  onToggleNotifications={() => {
+                    setShowNotifications((open) => !open);
+                    setHighlightInvitationId(null);
+                  }}
+                />
+              </motion.div>
+            ) : !selectedProjectId ? (
               <motion.div
                 key="dashboard"
                 initial={{ opacity: 0, y: 6 }}
@@ -618,6 +646,7 @@ export default function App() {
                     setShowNotifications((open) => !open);
                     setHighlightInvitationId(null);
                   }}
+                  onOpenRentalDashboard={() => setActiveView('rental')}
                 />
               </motion.div>
             ) : (

@@ -49,6 +49,7 @@ interface DashboardProps {
   sidebarToggleLabel?: string;
   unreadCount?: number;
   onToggleNotifications?: () => void;
+  onOpenRentalDashboard?: () => void;
 }
 
 export default function Dashboard({ 
@@ -62,6 +63,7 @@ export default function Dashboard({
   sidebarToggleLabel = 'Toggle sidebar',
   unreadCount = 0,
   onToggleNotifications,
+  onOpenRentalDashboard,
 }: DashboardProps) {
   const { user } = useAuth();
   // Database States
@@ -398,7 +400,7 @@ export default function Dashboard({
 
             {/* Rental */}
             <button
-              onClick={() => { dismissWelcome(); setProjectType('rental'); setShowCreateModal(true); }}
+              onClick={() => { dismissWelcome(); onOpenRentalDashboard?.(); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-purple-400 dark:hover:border-purple-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
               <div className="w-12 h-12 rounded-xl bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
