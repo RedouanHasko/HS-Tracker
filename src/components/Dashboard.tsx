@@ -79,10 +79,6 @@ export default function Dashboard({
   const [viewMode, setViewMode] = useState<'table' | 'cards'>(() => {
     return (localStorage.getItem("buildtrack_view_mode") as 'table' | 'cards') || 'table';
   });
-  // Welcome page state — show on first visit until dismissed
-  const [showWelcome, setShowWelcome] = useState(() => {
-    return localStorage.getItem("hs_tracker_welcome_dismissed") !== 'true';
-  });
   
   // Create New Project Form States
   const [projName, setProjName] = useState('');
@@ -136,10 +132,6 @@ export default function Dashboard({
   };
 
   // Add new project
-  const dismissWelcome = () => {
-    setShowWelcome(false);
-    localStorage.setItem("hs_tracker_welcome_dismissed", 'true');
-  };
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!projName.trim() || !user?.uid || !user.email) return;
@@ -235,7 +227,6 @@ export default function Dashboard({
       setRentalPricePerNight(0);
       setRentalCommissionRate(10);
       setShowCreateModal(false);
-      dismissWelcome();
       
       // Dispatch storage (keep for backwards compat just in case)
       window.dispatchEvent(new Event('storage'));
@@ -329,7 +320,7 @@ export default function Dashboard({
         )}
       </AnimatePresence>
 
-      {showWelcome ? (
+      {projects.length === 0 ? (
         /* Welcome Landing Page — Full bleed outside the container */
         <div className="flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)] text-center px-4 sm:px-6 -mt-14 pt-14 bg-gradient-to-b from-white via-slate-50/80 to-slate-50/40 dark:from-[#121212] dark:via-[#1a1a2e] dark:to-[#121212]">
           <div className="mb-8">
@@ -352,7 +343,7 @@ export default function Dashboard({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full max-w-3xl">
             {/* Construction */}
             <button
-              onClick={() => { dismissWelcome(); setProjectType('construction'); setShowCreateModal(true); }}
+              onClick={() => { setProjectType('construction'); setShowCreateModal(true); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-sky-400 dark:hover:border-sky-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
               <div className="w-12 h-12 rounded-xl bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
@@ -376,7 +367,7 @@ export default function Dashboard({
 
             {/* Service */}
             <button
-              onClick={() => { dismissWelcome(); setProjectType('service'); setShowCreateModal(true); }}
+              onClick={() => { setProjectType('service'); setShowCreateModal(true); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-teal-400 dark:hover:border-teal-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
               <div className="w-12 h-12 rounded-xl bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
@@ -400,7 +391,7 @@ export default function Dashboard({
 
             {/* Rental */}
             <button
-              onClick={() => { dismissWelcome(); onOpenRentalDashboard?.(); }}
+              onClick={() => { setProjectType('rental'); setShowCreateModal(true); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-purple-400 dark:hover:border-purple-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
               <div className="w-12 h-12 rounded-xl bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
@@ -422,12 +413,6 @@ export default function Dashboard({
               </span>
             </button>
           </div>
-          <button
-            onClick={dismissWelcome}
-            className="mt-8 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 underline underline-offset-2 transition-colors cursor-pointer"
-          >
-            {language === 'en' ? 'Skip to Dashboard →' : language === 'fr' ? 'Passer au tableau de bord →' : 'تخطي إلى لوحة التحكم ←'}
-          </button>
         </div>
       ) : (
         <div className="mx-auto w-full max-w-7xl flex-1 px-4 pb-8 pt-6 sm:px-6 lg:px-8">
@@ -438,6 +423,25 @@ export default function Dashboard({
             ? 'Grille de dépenses intuitive, répartition des coûts par membre et solutions'
             : 'دفتر مصاريف الموقع السلس، حسابات تقاسم التكاليف والتسويات'}
         </p>
+
+        {/* Module Navigation */}
+        <div className="flex items-center gap-2 mt-4 mb-2">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-1">{language === 'en' ? 'Modules:' : language === 'fr' ? 'Modules :' : 'الوحدات:'}</span>
+          <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 cursor-default">
+            <Building className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}
+          </span>
+          <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 cursor-default">
+            <Briefcase className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Services' : language === 'fr' ? 'Services' : 'خدمات'}
+          </span>
+          {onOpenRentalDashboard && (
+            <button
+              onClick={onOpenRentalDashboard}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-all cursor-pointer"
+            >
+              <KeyRound className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'الإيجارات'}
+            </button>
+          )}
+        </div>
 
       {/* Bento Grid Highlights Statistics (Shadcn KPI Cards) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6" id="bento-stats-grid">
@@ -568,6 +572,16 @@ export default function Dashboard({
                 <span className="hidden sm:inline">{language === 'en' ? 'Cards' : language === 'fr' ? 'Cartes' : 'كروت'}</span>
               </button>
             </div>
+
+            {onOpenRentalDashboard && (
+              <button
+                onClick={onOpenRentalDashboard}
+                className="ml-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-all cursor-pointer"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>{language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'الإيجارات'}</span>
+              </button>
+            )}
           </div>
 
           {searchQuery && (
