@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Search,
   Bell,
@@ -128,9 +128,17 @@ export function TopNavbar({
   activityHistoryLabel = 'History',
 }: TopNavbarProps) {
   const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
+  const [isScrolled, setIsScrolled] = useState(false);
   const { dropdown, dropdownVariants, overlay, overlayVariants } = useMotionConfig();
 
   useEscapeToClose(showLanguageDropdown, () => setShowLanguageDropdown(false));
+
+  useEffect(() => {
+    const onScroll = () => setIsScrolled(window.scrollY > 10);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   const userInitial = user?.displayName?.charAt(0) || user?.email?.charAt(0) || 'U';
 
@@ -142,7 +150,11 @@ export function TopNavbar({
   };
 
   return (
-    <header className="navbar-sticky sticky top-0 z-50 w-full shrink-0 border-b border-slate-200/70 bg-white/90 shadow-[0_1px_0_rgba(0,0,0,0.03)] backdrop-blur-xl backdrop-saturate-150 dark:border-white/[0.06] dark:bg-slate-950/90 dark:shadow-[0_1px_0_rgba(255,255,255,0.04)]">
+    <header className={`navbar-sticky sticky top-0 z-50 w-full shrink-0 border-b transition-all duration-200 ${
+      isScrolled
+        ? 'border-slate-200/70 bg-white/90 shadow-[0_1px_0_rgba(0,0,0,0.03)] backdrop-blur-xl backdrop-saturate-150 dark:border-white/[0.06] dark:bg-slate-950/90 dark:shadow-[0_1px_0_rgba(255,255,255,0.04)]'
+        : 'border-transparent bg-transparent'
+    }`}>
       <div className="flex h-14 w-full items-center justify-between gap-3 px-4 sm:gap-4 sm:px-6">
         {/* Left: sidebar toggle + brand / back + title */}
         <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
