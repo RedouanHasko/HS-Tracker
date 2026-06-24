@@ -70,7 +70,7 @@ Live sync: all members see changes in real time via `subscribeToProject`.
 
 Works on **free Firebase Hosting** — no Cloud Functions or Blaze plan required.
 
-1. Get a **free** API key from [Google AI Studio](https://aistudio.google.com/apikey)
+1. Provide your Gemini API key via `VITE_GEMINI_API_KEY` in `.env` or paste it in the app
 2. Open any project → tap the **floating bot button** (bottom-right)
 3. Paste your key once (saved in your browser only), or set `VITE_GEMINI_API_KEY` at build time
 
