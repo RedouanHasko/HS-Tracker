@@ -394,7 +394,7 @@ export default function App() {
     setShowAddModal(false);
   };
 
-  const filteredPages = projects.filter(p => p.projectType === currentView && p.name.toLowerCase().includes(sidebarFilter.toLowerCase()));
+  const filteredPages = projects.filter(p => (p.projectType || 'construction') === currentView && p.name.toLowerCase().includes(sidebarFilter.toLowerCase()));
 
   return currentView === 'welcome' ? (
     <WelcomePage

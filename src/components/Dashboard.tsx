@@ -252,7 +252,7 @@ export default function Dashboard({
 
   // Filter projects by workspace type and search query
   const filteredProjects = projects.filter(project => {
-    if (workspaceType && project.projectType !== workspaceType) return false;
+    if (workspaceType && (project.projectType || 'construction') !== workspaceType) return false;
     const query = searchQuery.toLowerCase();
     
     // Search in project metadata
