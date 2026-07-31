@@ -26,6 +26,8 @@ export interface AIDocumentDraft {
   recipientAddress?: string;
   recipientKind?: DocumentRecipientKind;
   items?: AIDocumentLineItem[];
+  /** Open the browser print/PDF dialog after the user confirms this draft. */
+  autoExport?: boolean;
 }
 
 const RECIPIENT_KINDS: DocumentRecipientKind[] = ['client', 'worker', 'member', 'supplier', 'other'];
@@ -74,5 +76,6 @@ export function parseDocumentDraft(params: Record<string, unknown>): AIDocumentD
     recipientAddress: params.recipientAddress ? String(params.recipientAddress) : undefined,
     recipientKind,
     items: items?.length ? items : undefined,
+    autoExport: params.autoExport === true || params.exportPdf === true,
   };
 }

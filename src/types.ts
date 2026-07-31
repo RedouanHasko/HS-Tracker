@@ -6,7 +6,7 @@ export type ProjectType = 'construction' | 'service' | 'rental';
 
 export type UserRole = 'read_only' | 'contributor' | 'editor' | 'manager' | 'co_owner' | 'owner';
 
-export type ExpenseCategory = 'materials' | 'workers' | 'equipment' | 'transportation' | 'miscellaneous';
+export type ExpenseCategory = 'materials' | 'workers' | 'equipment' | 'transportation' | 'utilities' | 'cleaning' | 'maintenance' | 'miscellaneous';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed';
 
@@ -112,6 +112,14 @@ export interface Expense {
   /** Who logged this expense */
   createdBy?: string;
   createdByName?: string;
+  /** Commission/markup percentage added for client invoicing */
+  commissionPercent?: number;
+  /** Rental accounting allocation. Existing rental expenses default to owner. */
+  rentalChargeTo?: 'owner' | 'management' | 'guest' | 'rent';
+  /** Optional stay associated with a rental expense. */
+  rentalBookingId?: string;
+  /** Stable source key used to make legacy imports idempotent. */
+  legacySourceId?: string;
 }
 
 export interface Photo {
@@ -119,6 +127,10 @@ export interface Photo {
   sectionId?: string;
   title: string;
   url: string;
+  /** Firestore media reference or Firebase Storage object path. */
+  storagePath?: string;
+  sizeBytes?: number;
+  originalName?: string;
   type: PhotoType;
   comments: PhotoComment[];
   tags: string[];
@@ -166,15 +178,21 @@ export type RentalBookingStatus = 'upcoming' | 'active' | 'completed' | 'cancell
 
 export interface RentalProperty {
   ownerName: string;
+  ownerEmail?: string;
+  ownerPhone?: string;
   buildingNumber: string;
   pricePerNight: number;
-  commissionRate: 10 | 20;
+  commissionRate: number;
+  /** Commission decisions saved per owner statement month (YYYY-MM). */
+  monthlyCommissionRates?: Record<string, number>;
+  notes?: string;
 }
 
 export interface RentalBooking {
   id: string;
   clientName: string;
   clientPhone: string;
+  source?: string;
   numberOfGuests: number;
   checkIn: string;
   checkOut: string;
@@ -186,6 +204,47 @@ export interface RentalBooking {
   notes?: string;
   paidAmount: number;
   balanceDue: number;
+  /** Actual rate used for this stay; falls back to totalAmount / totalNights. */
+  nightlyRate?: number;
+  /** Booking-specific decision. Undefined means use the monthly/property default. */
+  commissionRate?: number;
+  cleaningFee?: number;
+  cleaningChargeTo?: 'owner' | 'management' | 'guest';
+  originalCurrency?: string;
+  originalAmount?: number;
+  exchangeRate?: number;
+  legacySourceId?: string;
+  /** True when the stay was entered later from previous/manual records. */
+  historicalEntry?: boolean;
+  /** Audit timestamp for when the record was added to this system. */
+  recordedAt?: string;
+  /** Existing aggregate retained as an opening balance when payment history is introduced. */
+  paymentOpeningBalance?: number;
+  /** Individual guest installments. New payments are appended and never overwrite prior entries. */
+  payments?: RentalBookingPayment[];
+}
+
+export type RentalPaymentMethod = 'cash' | 'bank_transfer' | 'card' | 'online' | 'other';
+
+export interface RentalBookingPayment {
+  id: string;
+  date: string;
+  amount: number;
+  method: RentalPaymentMethod;
+  notes?: string;
+  receiptNumber: string;
+  recordedAt: string;
+  recordedBy?: string;
+}
+
+export interface RentalOwnerPayment {
+  id: string;
+  date: string;
+  amount: number;
+  method?: 'bank_transfer' | 'cash' | 'offset' | 'other';
+  notes?: string;
+  period?: string;
+  legacySourceId?: string;
 }
 
 export interface Project {
@@ -210,6 +269,7 @@ export interface Project {
   reimbursements?: Reimbursement[];
   rentalProperty?: RentalProperty;
   rentalBookings?: RentalBooking[];
+  rentalOwnerPayments?: RentalOwnerPayment[];
   /** Accepted members — used for Firestore queries and read access */
   memberEmails?: string[];
   /** Pending invitees — read + accept/decline only (not full member until accepted) */
@@ -348,12 +408,14 @@ export interface DocumentParty {
 }
 
 export type DocumentKind = 'invoice' | 'receipt' | 'voucher';
+export type DocumentLineColumn = 'quantity' | 'unitPrice' | 'total';
 
 export interface DocumentKindPreset {
   prefix: string;
   taxRate: number;
   defaultNotes: string;
   paperFormat: 'A4' | 'A5';
+  visibleColumns: DocumentLineColumn[];
 }
 
 export type DocumentPresetsMap = Record<DocumentKind, DocumentKindPreset>;

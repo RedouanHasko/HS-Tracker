@@ -11,6 +11,9 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        strategies: 'injectManifest',
+        srcDir: 'src',
+        filename: 'sw.ts',
         includeAssets: ['hs-infinity-icon.jpeg', 'icons/*.png'],
         manifest: {
           name: 'HS Tracker',
@@ -50,13 +53,13 @@ export default defineConfig(() => {
             },
           ],
         },
-        workbox: {
+        injectManifest: {
           globPatterns: ['**/*.{js,css,html,ico,png,jpeg,svg,woff2,webmanifest}'],
-          navigateFallback: '/index.html',
           maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
         },
         devOptions: {
-          enabled: true,
+          // Development must always serve current source; a dev SW can retain obsolete UI handlers.
+          enabled: false,
         },
       }),
     ],

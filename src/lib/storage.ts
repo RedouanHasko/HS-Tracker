@@ -4,7 +4,13 @@ import { db, storage } from './firebase';
 import { stripUndefinedForFirestore } from './firestoreSanitize';
 import { compressImageForSparkPlan } from '../utils/imageCompression';
 
-export type TaskFileCategory = 'before' | 'after' | 'progress' | 'attachments' | 'expense_receipt';
+export type TaskFileCategory =
+  | 'before'
+  | 'after'
+  | 'progress'
+  | 'attachments'
+  | 'expense_receipt'
+  | 'project_gallery';
 
 /**
  * Storage mode:
@@ -123,6 +129,23 @@ export async function uploadProjectTaskFile(
     }
   }
   return uploadToFirestore(projectId, taskId, category, file, fileName, mimeType);
+}
+
+/** Upload a project-level gallery image without embedding it in the project document. */
+export async function uploadProjectGalleryImage(
+  projectId: string,
+  file: Blob,
+  fileName: string,
+  mimeType = 'image/jpeg'
+): Promise<{ url: string; storagePath: string; sizeBytes: number }> {
+  return uploadProjectTaskFile(
+    projectId,
+    '_project_gallery',
+    'project_gallery',
+    file,
+    fileName,
+    mimeType
+  );
 }
 
 /** Upload a supplier receipt / bon image for an expense */

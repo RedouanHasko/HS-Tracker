@@ -8,9 +8,9 @@ import {
   MapPin, 
   Users, 
   Clock, 
+  ChevronLeft,
   ChevronRight,
   Activity,
-  Briefcase, 
   AlertTriangle,
   CheckCircle2,
   X,
@@ -38,6 +38,8 @@ import { buildActivityMemberEmails } from '../utils/activityHelpers';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useMotionConfig } from '../utils/motionPresets';
 
+const PROJECTS_PER_PAGE = 11;
+
 interface DashboardProps {
   onSelectProject: (projectId: string) => void;
   language: Language;
@@ -49,7 +51,9 @@ interface DashboardProps {
   sidebarToggleLabel?: string;
   unreadCount?: number;
   onToggleNotifications?: () => void;
-  workspaceType?: 'construction' | 'service';
+  workspaceType?: 'construction';
+  onBack?: () => void;
+  backLabel?: string;
 }
 
 export default function Dashboard({ 
@@ -64,6 +68,8 @@ export default function Dashboard({
   unreadCount = 0,
   onToggleNotifications,
   workspaceType,
+  onBack,
+  backLabel = 'All Workspaces',
 }: DashboardProps) {
   const { user } = useAuth();
   // Database States
@@ -74,6 +80,7 @@ export default function Dashboard({
   const [searchQuery, setSearchQuery] = useState('');
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [projectPage, setProjectPage] = useState(1);
   useEscapeToClose(showCreateModal, () => setShowCreateModal(false));
   const { modal, modalVariants, overlayVariants, overlay } = useMotionConfig();
   const [viewMode, setViewMode] = useState<'table' | 'cards'>(() => {
@@ -87,14 +94,14 @@ export default function Dashboard({
   const [description, setDescription] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
-  const [budget, setBudget] = useState(100000);
+  const [budget, setBudget] = useState(0);
   const [currency, setCurrency] = useState('DH');
   const [projectType, setProjectType] = useState<ProjectType>('construction');
   // Rental-specific fields
   const [rentalOwnerName, setRentalOwnerName] = useState('');
   const [rentalBuildingNumber, setRentalBuildingNumber] = useState('');
   const [rentalPricePerNight, setRentalPricePerNight] = useState(0);
-  const [rentalCommissionRate, setRentalCommissionRate] = useState<10 | 20>(10);
+  const [rentalCommissionRate, setRentalCommissionRate] = useState(10);
 
   const t = TRANSLATIONS[language];
 
@@ -108,7 +115,12 @@ export default function Dashboard({
     const loadActivities = async (userEmail: string, projectIds: string[]) => {
       try {
         const dbActivities = await getDashboardActivities(userEmail, projectIds);
-        setActivities(dbActivities.slice(0, 10));
+        const projectIdSet = new Set(projectIds);
+        setActivities(
+          dbActivities
+            .filter((activity) => projectIdSet.has(activity.projectId))
+            .slice(0, 10)
+        );
       } catch (err) {
         console.warn('Activities load error:', err);
       }
@@ -116,13 +128,18 @@ export default function Dashboard({
 
     const unsubProjects = subscribeToProjects(user.email, (updatedProjects) => {
       setProjects(updatedProjects);
-      loadActivities(user.email, updatedProjects.map((p) => p.id));
+      const scopedProjects = workspaceType
+        ? updatedProjects.filter(
+            (project) => (project.projectType || 'construction') === workspaceType
+          )
+        : updatedProjects;
+      loadActivities(user.email, scopedProjects.map((project) => project.id));
     });
 
     return () => {
       unsubProjects();
     };
-  }, [user]);
+  }, [user, workspaceType]);
 
   // Sync state back to LocalStorage is removed and individually updated to DB
   const updateProjectsState = async (updated: Project[]) => {
@@ -138,13 +155,14 @@ export default function Dashboard({
 
     const projectId = `proj_${Date.now()}`;
     const userEmail = user.email.toLowerCase();
+    const creationProjectType = workspaceType || projectType;
 
-    const defaultBudget = projectType === 'construction' ? (Number(budget) || 10000) : 0;
-    const defaultSections = projectType === 'construction' 
+    const defaultBudget = creationProjectType === 'construction' ? Math.max(0, Number(budget) || 0) : 0;
+    const defaultSections = creationProjectType === 'construction'
       ? [
           { id: `sec_p_${Date.now()}`, projectId: projectId, title: t.sections.painting, progress: 0, status: 'planning' },
           { id: `sec_pl_${Date.now()}`, projectId: projectId, title: t.sections.plumbing, progress: 0, status: 'planning' }
-        ]
+        ] as Project['sections']
       : [];
 
     const newProject: Project = {
@@ -158,7 +176,7 @@ export default function Dashboard({
       budget: defaultBudget,
       currency: currency || 'DH',
       status: 'planning',
-      projectType: projectType,
+      projectType: creationProjectType,
       creatorEmail: userEmail,
       members: [
         { email: userEmail, name: user.displayName || userEmail.split('@')[0], role: 'owner', status: 'accepted' }
@@ -182,7 +200,7 @@ export default function Dashboard({
       ],
       photos: [],
       documents: [],
-      ...(projectType === 'rental' && {
+      ...(creationProjectType === 'rental' && {
         rentalProperty: {
           ownerName: rentalOwnerName,
           buildingNumber: rentalBuildingNumber,
@@ -219,7 +237,7 @@ export default function Dashboard({
       setDescription('');
       setStartDate('');
       setEndDate('');
-      setBudget(100000);
+      setBudget(0);
       setCurrency('DH');
       setProjectType('construction');
       setRentalOwnerName('');
@@ -235,24 +253,28 @@ export default function Dashboard({
     }
   };
 
+  const workspaceProjects = workspaceType
+    ? projects.filter((project) => (project.projectType || 'construction') === workspaceType)
+    : projects;
+  const createProjectType = workspaceType || projectType;
+
   // Calculations for KPI numbers
-  const primaryCurrency = projects.length > 0 ? projects[0].currency : 'DH';
-  const activeProjectsCount = projects.filter(p => p.status !== 'completed' && p.status !== 'cancelled').length;
-  const completedProjectsCount = projects.filter(p => p.status === 'completed').length;
+  const primaryCurrency = workspaceProjects.length > 0 ? workspaceProjects[0].currency : 'DH';
+  const activeProjectsCount = workspaceProjects.filter(p => p.status !== 'completed' && p.status !== 'cancelled').length;
+  const completedProjectsCount = workspaceProjects.filter(p => p.status === 'completed').length;
   
-  const totalExpensesSum = projects.reduce((sum, p) => {
+  const totalExpensesSum = workspaceProjects.reduce((sum, p) => {
     return sum + p.expenses.reduce((s, e) => s + e.amount, 0);
   }, 0);
 
-  const totalBudgetsSum = projects.reduce((sum, p) => sum + p.budget, 0);
+  const totalBudgetsSum = workspaceProjects.reduce((sum, p) => sum + p.budget, 0);
 
-  const totalPendingTasksCount = projects.reduce((sum, p) => {
+  const totalPendingTasksCount = workspaceProjects.reduce((sum, p) => {
     return sum + p.tasks.filter(t => t.status !== 'completed').length;
   }, 0);
 
   // Filter projects by workspace type and search query
-  const filteredProjects = projects.filter(project => {
-    if (workspaceType && (project.projectType || 'construction') !== workspaceType) return false;
+  const filteredProjects = workspaceProjects.filter(project => {
     const query = searchQuery.toLowerCase();
     
     // Search in project metadata
@@ -271,6 +293,12 @@ export default function Dashboard({
     );
     return expMatch;
   });
+  const projectPageCount = Math.max(1, Math.ceil(filteredProjects.length / PROJECTS_PER_PAGE));
+  const activeProjectPage = Math.min(projectPage, projectPageCount);
+  const visibleProjects = filteredProjects.slice(
+    (activeProjectPage - 1) * PROJECTS_PER_PAGE,
+    activeProjectPage * PROJECTS_PER_PAGE
+  );
 
   return (
     <div className="flex min-h-full w-full flex-col" id="dashboard-viewport">
@@ -286,7 +314,10 @@ export default function Dashboard({
         showSidebarToggle
         mode="dashboard"
         searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={(value) => {
+          setSearchQuery(value);
+          setProjectPage(1);
+        }}
         searchPlaceholder={t.searchPlaceholder}
         createLabel={t.createNewProject}
         onCreateProject={() => setShowCreateModal(true)}
@@ -300,6 +331,8 @@ export default function Dashboard({
         }}
         mobileMenuOpen={showMobileMenu}
         langLabel={t.langLabel}
+        onBack={onBack}
+        backLabel={backLabel}
       />
 
       {/* Mobile Menu Dropdown */}
@@ -316,14 +349,17 @@ export default function Dashboard({
             onCreateProject={() => setShowCreateModal(true)}
             onOpenProfile={() => window.dispatchEvent(new CustomEvent('open_profile_settings'))}
             searchQuery={searchQuery}
-            setSearchQuery={setSearchQuery}
+            setSearchQuery={(value) => {
+              setSearchQuery(value);
+              setProjectPage(1);
+            }}
           />
         )}
       </AnimatePresence>
 
-      {projects.length === 0 ? (
+      {workspaceProjects.length === 0 ? (
         /* Welcome Landing Page — Full bleed outside the container */
-        <div className="flex flex-col items-center justify-center min-h-[calc(100vh-3.5rem)] text-center px-4 sm:px-6 -mt-14 pt-14 bg-gradient-to-b from-white via-slate-50/80 to-slate-50/40 dark:from-[#121212] dark:via-[#1a1a2e] dark:to-[#121212]">
+        <div className="-mt-14 flex min-h-[calc(100dvh-3.5rem)] flex-col items-center justify-center bg-gradient-to-b from-white via-slate-50/80 to-slate-50/40 px-4 pt-14 text-center dark:from-[#121212] dark:via-[#1a1a2e] dark:to-[#121212] sm:px-6">
           <div className="mb-8">
             <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-sky-500 to-blue-600 shadow-lg shadow-sky-200 dark:shadow-sky-950 mb-5">
               <span className="text-3xl font-bold text-white">HS</span>
@@ -333,15 +369,15 @@ export default function Dashboard({
             </h1>
             <p className="text-sm text-slate-500 dark:text-slate-400 max-w-lg mx-auto leading-relaxed">
               {language === 'en'
-                ? 'Manage your construction projects, services, and rental properties all in one place. Select a workspace type to get started.'
+                ? 'Manage your construction projects and rental properties in one place. Select a workspace type to get started.'
                 : language === 'fr'
-                  ? 'Gérez vos projets de construction, services et locations en un seul endroit. Choisissez un type pour commencer.'
+                  ? 'Gérez vos projets de construction et locations en un seul endroit. Choisissez un type pour commencer.'
                   : 'إدارة مشاريع البناء والخدمات والإيجارات في مكان واحد. اختر نوع مساحة العمل للبدء.'}
             </p>
           </div>
 
           {/* Type Selection Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 w-full max-w-3xl">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-2xl">
             {/* Construction */}
             <button
               onClick={() => { setProjectType('construction'); setShowCreateModal(true); }}
@@ -366,32 +402,8 @@ export default function Dashboard({
               </span>
             </button>
 
-            {/* Service */}
-            <button
-              onClick={() => { setProjectType('service'); setShowCreateModal(true); }}
-              className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-teal-400 dark:hover:border-teal-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
-            >
-              <div className="w-12 h-12 rounded-xl bg-teal-100 dark:bg-teal-900/30 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
-                <Briefcase className="w-6 h-6 text-teal-600 dark:text-teal-400" />
-              </div>
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white mb-1">
-                {language === 'en' ? 'Service' : language === 'fr' ? 'Service' : 'خدمة'}
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                {language === 'en'
-                  ? 'Manage services, maintenance tasks, and expenses without needing a budget upfront.'
-                  : language === 'fr'
-                    ? 'Gérez les services, tâches de maintenance et dépenses sans budget initial.'
-                    : 'إدارة الخدمات ومهام الصيانة والمصروفات بدون الحاجة لميزانية مسبقة.'}
-              </p>
-              <span className="inline-flex items-center gap-1 mt-3 text-xs font-semibold text-teal-600 dark:text-teal-400 group-hover:gap-1.5 transition-all">
-                <PlusCircle className="w-3.5 h-3.5" />
-                {language === 'en' ? 'New Service' : language === 'fr' ? 'Nouveau Service' : 'خدمة جديدة'}
-              </span>
-            </button>
-
-            {/* Rental */}
-            <button
+            {/* Rental is only offered on an unscoped dashboard. */}
+            {!workspaceType && <button
               onClick={() => { setProjectType('rental'); setShowCreateModal(true); }}
               className="group p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:border-purple-400 dark:hover:border-purple-500 transition-all cursor-pointer text-left hover:shadow-lg hover:-translate-y-0.5"
             >
@@ -412,7 +424,7 @@ export default function Dashboard({
                 <PlusCircle className="w-3.5 h-3.5" />
                 {language === 'en' ? 'New Rental' : language === 'fr' ? 'Nouvelle Location' : 'إيجار جديد'}
               </span>
-            </button>
+            </button>}
           </div>
         </div>
       ) : (
@@ -431,9 +443,6 @@ export default function Dashboard({
           <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 cursor-default">
             <Building className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}
           </span>
-            <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 cursor-default">
-              <Briefcase className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Services' : language === 'fr' ? 'Services' : 'خدمات'}
-            </span>
         </div>
 
       {/* Bento Grid Highlights Statistics (Shadcn KPI Cards) */}
@@ -451,7 +460,7 @@ export default function Dashboard({
               {activeProjectsCount}
             </span>
             <span className="text-xs text-slate-450 font-mono">
-              / {projects.length} {language === "en" ? "total" : language === "fr" ? "au total" : "إجمالي"}
+              / {workspaceProjects.length} {language === "en" ? "total" : language === "fr" ? "au total" : "إجمالي"}
             </span>
           </div>
         </div>
@@ -521,8 +530,8 @@ export default function Dashboard({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-8">
         {/* Left Column: Projects Catalog List */}
         <div className="lg:col-span-2 space-y-4 font-sans" id="project-catalog-section">
-          <div className="flex items-center justify-between">
-            <h3 className="font-display font-semibold text-lg text-slate-900 dark:text-white flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="min-w-0 font-display font-semibold text-lg text-slate-900 dark:text-white flex items-center gap-2">
               <Layers className="w-4 h-4 text-sky-600" />
               {language === 'en' ? 'Active Workspaces' : language === 'fr' ? 'Espaces Chantiers Actifs' : 'مساحات العمل النشطة'}
               <span className="text-xs px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-850 text-slate-500 dark:text-slate-400 font-mono font-bold">
@@ -568,9 +577,9 @@ export default function Dashboard({
           </div>
 
           {searchQuery && (
-            <div className="px-3.5 py-1.5 rounded-lg bg-sky-500/5 dark:bg-slate-900/60 text-xs text-sky-700 dark:text-sky-305 border border-sky-100 dark:border-sky-950/40 flex justify-between items-center font-mono">
-              <span>{language === 'en' ? `Filtered by: "${searchQuery}"` : language === 'fr' ? `Filtré par: "${searchQuery}"` : `تصفية بواسطة: "${searchQuery}"`}</span>
-              <button onClick={() => setSearchQuery('')} className="underline hover:no-underline font-semibold cursor-pointer">
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-sky-100 bg-sky-500/5 px-3.5 py-1.5 font-mono text-xs text-sky-700 dark:border-sky-950/40 dark:bg-slate-900/60 dark:text-sky-305">
+              <span className="min-w-0 truncate">{language === 'en' ? `Filtered by: "${searchQuery}"` : language === 'fr' ? `Filtré par: "${searchQuery}"` : `تصفية بواسطة: "${searchQuery}"`}</span>
+              <button onClick={() => { setSearchQuery(''); setProjectPage(1); }} className="underline hover:no-underline font-semibold cursor-pointer">
                 {language === 'en' ? 'Reset' : language === 'fr' ? 'Réinitialiser' : 'إعادة تعيين'}
               </button>
             </div>
@@ -583,7 +592,7 @@ export default function Dashboard({
                 {language === 'en' ? 'No work spaces match your query.' : language === 'fr' ? 'Aucun chantier ne correspond à la recherche.' : 'لا توجد مساحات عمل تطابق بحثك.'}
               </p>
               <button 
-                onClick={() => setSearchQuery('')}
+                onClick={() => { setSearchQuery(''); setProjectPage(1); }}
                 className="mt-3 inline-flex items-center gap-1 text-xs text-sky-600 hover:underline font-semibold cursor-pointer"
               >
                 {language === 'en' ? 'Clear Filters' : language === 'fr' ? 'Effacer les Filtres' : 'مسح التصفية'}
@@ -603,15 +612,18 @@ export default function Dashboard({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
-                  {filteredProjects.map((project) => {
+                  {visibleProjects.map((project, index) => {
                     const totalSpent = project.expenses.reduce((s, e) => s + e.amount, 0);
                     const progressPct = project.tasks.length > 0
                       ? Math.round((project.tasks.filter(t => t.status === 'completed').length / project.tasks.length) * 100)
                       : 0;
 
                     return (
-                      <tr
+                      <motion.tr
                         key={project.id}
+                        initial={{ opacity: 0, x: 24 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ duration: 0.24, delay: index * 0.03, ease: [0.22, 1, 0.36, 1] }}
                         onClick={() => onSelectProject(project.id)}
                         className="group hover:bg-slate-50/60 dark:hover:bg-slate-950/40 transition-all cursor-pointer text-xs"
                       >
@@ -697,7 +709,7 @@ export default function Dashboard({
                         <td className="py-3.5 px-4 text-right">
                           <ChevronRight className="w-4 h-4 text-slate-350 dark:text-slate-650 group-hover:text-slate-600 dark:group-hover:text-slate-300 transition-all translate-x-0 group-hover:translate-x-0.5" />
                         </td>
-                      </tr>
+                      </motion.tr>
                     );
                   })}
                 </tbody>
@@ -705,15 +717,18 @@ export default function Dashboard({
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {filteredProjects.map((project) => {
+              {visibleProjects.map((project, index) => {
                 const totalSpent = project.expenses.reduce((s, e) => s + e.amount, 0);
                 const progressPct = project.tasks.length > 0
                   ? Math.round((project.tasks.filter(t => t.status === 'completed').length / project.tasks.length) * 100)
                   : 0;
 
                 return (
-                  <div
+                  <motion.div
                     key={project.id}
+                    initial={{ opacity: 0, x: 24 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.24, delay: index * 0.03, ease: [0.22, 1, 0.36, 1] }}
                     className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-slate-350 dark:hover:border-slate-700 transition-all rounded-xl cursor-pointer flex flex-col justify-between hover:shadow-md"
                     onClick={() => onSelectProject(project.id)}
                     id={`project-card-${project.id}`}
@@ -804,9 +819,36 @@ export default function Dashboard({
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </motion.div>
                 );
               })}
+            </div>
+          )}
+          {projectPageCount > 1 && (
+            <div className="mt-3 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+              <span>
+                {language === 'en' ? 'Page' : language === 'fr' ? 'Page' : 'صفحة'} {activeProjectPage} / {projectPageCount}
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setProjectPage((page) => Math.max(1, page - 1))}
+                  disabled={activeProjectPage === 1}
+                  className="p-1.5 rounded-md border border-slate-200 dark:border-slate-800 disabled:opacity-40"
+                  aria-label={language === 'en' ? 'Previous page' : language === 'fr' ? 'Page précédente' : 'الصفحة السابقة'}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProjectPage((page) => Math.min(projectPageCount, page + 1))}
+                  disabled={activeProjectPage === projectPageCount}
+                  className="p-1.5 rounded-md border border-slate-200 dark:border-slate-800 disabled:opacity-40"
+                  aria-label={language === 'en' ? 'Next page' : language === 'fr' ? 'Page suivante' : 'الصفحة التالية'}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -875,7 +917,7 @@ export default function Dashboard({
       <AnimatePresence>
       {showCreateModal && (
         <motion.div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px] max-sm:backdrop-blur-none"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-3 py-4 backdrop-blur-[2px] max-sm:backdrop-blur-none sm:items-center sm:px-4"
           id="create-modal"
           onClick={() => setShowCreateModal(false)}
           role="presentation"
@@ -891,7 +933,7 @@ export default function Dashboard({
             animate="animate"
             exit="exit"
             transition={modal}
-            className="panel-motion-gpu w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 text-left font-sans shadow-2xl dark:border-slate-805 dark:bg-slate-900"
+            className="panel-motion-gpu max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 text-left font-sans shadow-2xl dark:border-slate-805 dark:bg-slate-900 sm:p-5"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -956,16 +998,16 @@ export default function Dashboard({
                     {language === 'en' ? 'Project Type' : language === 'fr' ? 'Type de Projet' : 'نوع المشروع'}
                   </label>
                   <select
-                    value={projectType}
+                    value={createProjectType}
                     onChange={(e) => setProjectType(e.target.value as ProjectType)}
+                    disabled={Boolean(workspaceType)}
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 font-semibold"
                   >
                     <option value="construction">{t.projectTypes.construction}</option>
-                    <option value="service">{t.projectTypes.service}</option>
-                    <option value="rental">{t.projectTypes.rental}</option>
+                    {!workspaceType && <option value="rental">{t.projectTypes.rental}</option>}
                   </select>
                 </div>
-                {projectType === 'rental' ? (
+                {createProjectType === 'rental' ? (
                   <>
                     <div>
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
@@ -1008,14 +1050,14 @@ export default function Dashboard({
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                         {language === 'en' ? 'Commission Rate' : language === 'fr' ? 'Taux de commission' : 'نسبة العمولة'}
                       </label>
-                      <select
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
                         value={rentalCommissionRate}
-                        onChange={(e) => setRentalCommissionRate(Number(e.target.value) as 10 | 20)}
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 font-semibold"
-                      >
-                        <option value={10}>10%</option>
-                        <option value={20}>20%</option>
-                      </select>
+                        onChange={(e) => setRentalCommissionRate(Math.max(0, Number(e.target.value) || 0))}
+                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono font-semibold"
+                      />
                     </div>
                   </>
                 ) : (
@@ -1023,16 +1065,18 @@ export default function Dashboard({
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                     {language === 'en' ? 'Budget Limit' : language === 'fr' ? 'Limite du Budget' : 'الحد الأقصى للميزانية'}
-                    {projectType !== 'construction' && (
+                    {createProjectType !== 'construction' && (
                       <span className="text-[9px] text-slate-400 ml-1 font-normal">(optional)</span>
                     )}
                   </label>
                   <input
                     type="number"
-                    value={budget}
-                    onChange={(e) => setBudget(Number(e.target.value))}
+                    min={0}
+                    placeholder="0"
+                    value={budget || ''}
+                    onChange={(e) => setBudget(Math.max(0, Number(e.target.value) || 0))}
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-905 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono"
-                    disabled={projectType !== 'construction'}
+                    disabled={createProjectType !== 'construction'}
                   />
                 </div>
                 <div>
@@ -1066,7 +1110,7 @@ export default function Dashboard({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                     {language === 'en' ? 'Start Date' : language === 'fr' ? 'Date d\'ouverture' : 'تاريخ بدء المشروع'}

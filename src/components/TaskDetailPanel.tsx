@@ -11,7 +11,7 @@ import {
   Plus,
   User,
 } from 'lucide-react';
-import { Task, TaskMedia, TaskAttachment, Language, Project } from '../types';
+import { Task, TaskMedia, TaskAttachment, Language, Project, TaskCostLine } from '../types';
 import TaskSubtasksSection from './TaskSubtasksSection';
 import type { ConfirmRequest } from './ConfirmDialog';
 import {
@@ -31,6 +31,7 @@ import { motion } from 'motion/react';
 import { useMotionConfig } from '../utils/motionPresets';
 
 interface TaskDetailPanelProps {
+  key?: React.Key;
   task: Task;
   project: Project;
   language: Language;
@@ -426,7 +427,7 @@ export default function TaskDetailPanel({
         animate="animate"
         exit="exit"
         transition={modal}
-        className="panel-motion-gpu relative flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-t-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:rounded-2xl"
+        className="panel-motion-gpu relative flex max-h-[92dvh] w-full max-w-3xl flex-col overflow-hidden rounded-t-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:rounded-2xl"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

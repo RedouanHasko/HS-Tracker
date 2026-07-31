@@ -145,8 +145,9 @@ export function TopNavbar({
   const statusColors: Record<NonNullable<Project['status']>, string> = {
     planning: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
     in_progress: 'bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400',
+    paused: 'bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-400',
     completed: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-400',
-    on_hold: 'bg-rose-100 text-rose-800 dark:bg-rose-500/15 dark:text-rose-400',
+    cancelled: 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
   };
 
   return (
@@ -155,7 +156,7 @@ export function TopNavbar({
         ? 'border-slate-200/70 bg-white/90 shadow-[0_1px_0_rgba(0,0,0,0.03)] backdrop-blur-xl backdrop-saturate-150 dark:border-white/[0.06] dark:bg-slate-950/90 dark:shadow-[0_1px_0_rgba(255,255,255,0.04)]'
         : 'border-transparent bg-transparent'
     }`}>
-      <div className="flex h-14 w-full items-center justify-between gap-3 px-4 sm:gap-4 sm:px-6">
+      <div className="flex h-14 w-full items-center justify-between gap-1.5 px-2 sm:gap-4 sm:px-6">
         {/* Left: sidebar toggle + brand / back + title */}
         <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
           {showSidebarToggle && onToggleSidebar && (
@@ -174,7 +175,7 @@ export function TopNavbar({
             </NavIconButton>
           )}
 
-          {mode === 'project' && onBack ? (
+          {onBack ? (
             <>
               <button
                 type="button"
@@ -192,16 +193,24 @@ export function TopNavbar({
               >
                 <ArrowLeft className="h-5 w-5" />
               </button>
-              {projectTitle && (
+              {mode === 'project' && projectTitle && (
                 <div className="hidden min-w-0 md:block">
                   <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">{projectTitle}</p>
+                </div>
+              )}
+              {mode !== 'project' && (
+                <div className="flex min-w-0 items-center gap-2.5 rounded-lg py-1 pr-2">
+                  <HSLogo className="h-8 w-8 shrink-0 sm:h-9 sm:w-9" compact />
+                  <span className="hidden truncate font-display text-base font-bold tracking-tight text-slate-900 dark:text-white min-[390px]:block sm:text-lg">
+                    HS Tracker
+                  </span>
                 </div>
               )}
             </>
           ) : (
             <div className="flex min-w-0 items-center gap-2.5 rounded-lg py-1 pr-2">
               <HSLogo className="h-8 w-8 shrink-0 sm:h-9 sm:w-9" compact />
-              <span className="truncate font-display text-base font-bold tracking-tight text-slate-900 dark:text-white sm:text-lg">
+              <span className="hidden truncate font-display text-base font-bold tracking-tight text-slate-900 dark:text-white min-[390px]:block sm:text-lg">
                 HS Tracker
               </span>
             </div>
@@ -414,7 +423,7 @@ export function TopNavbar({
                 )}
               </NavIconButton>
               {onOpenActivityHistory && (
-                <NavIconButton onClick={onOpenActivityHistory} title={activityHistoryLabel}>
+                <NavIconButton onClick={onOpenActivityHistory} title={activityHistoryLabel} className="hidden sm:inline-flex">
                   <History className="h-[18px] w-[18px] text-cyan-600 dark:text-cyan-400" />
                 </NavIconButton>
               )}
@@ -426,7 +435,7 @@ export function TopNavbar({
               <button
                 type="button"
                 onClick={() => window.dispatchEvent(new CustomEvent('open_profile_settings'))}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-sky-600 text-xs font-bold uppercase text-white"
+                className="hidden h-9 w-9 items-center justify-center rounded-lg bg-sky-600 text-xs font-bold uppercase text-white sm:inline-flex"
               >
                 {userInitial}
               </button>

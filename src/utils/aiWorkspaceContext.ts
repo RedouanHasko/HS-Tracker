@@ -16,6 +16,7 @@ export function buildWorkspaceContext(projects: Project[], userEmail: string): s
     return {
       projectId: p.id,
       name: p.name,
+      projectType: p.projectType,
       clientName: p.clientName,
       address: p.address,
       status: p.status,
@@ -27,6 +28,25 @@ export function buildWorkspaceContext(projects: Project[], userEmail: string): s
       taskCount: p.tasks.length,
       expenseCount: p.expenses.length,
       memberCount: p.members.length,
+      rentalProperty: p.rentalProperty
+        ? {
+            ownerName: p.rentalProperty.ownerName,
+            ownerEmail: p.rentalProperty.ownerEmail,
+            buildingNumber: p.rentalProperty.buildingNumber,
+            pricePerNight: p.rentalProperty.pricePerNight,
+            commissionRate: p.rentalProperty.commissionRate,
+          }
+        : undefined,
+      recentBookings: (p.rentalBookings || []).slice(-20).map((booking) => ({
+        id: booking.id,
+        clientName: booking.clientName,
+        checkIn: booking.checkIn,
+        checkOut: booking.checkOut,
+        totalNights: booking.totalNights,
+        totalAmount: booking.totalAmount,
+        commissionRate: booking.commissionRate,
+        status: booking.status,
+      })),
       myAssignedTasks: myTasks,
       recentTasks: p.tasks.slice(0, 12).map((t) => ({
         id: t.id,
@@ -67,7 +87,11 @@ export function resolveProjectFromParams(
   const projectName = params.projectName as string | undefined;
   if (projectName) {
     const q = projectName.toLowerCase();
-    const hit = projects.find((p) => p.name.toLowerCase().includes(q));
+    const hit = projects.find((p) =>
+      [p.name, p.address, p.rentalProperty?.buildingNumber, p.rentalProperty?.ownerName]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(q))
+    );
     if (hit) return hit;
   }
   return fallback ?? null;

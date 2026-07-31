@@ -1,6 +1,6 @@
 import { Project } from '../types';
 
-export type ProjectTab = 'overview' | 'expenses' | 'tasks' | 'docs';
+export type ProjectTab = 'overview' | 'expenses' | 'tasks' | 'docs' | 'gallery' | 'rental';
 
 export type AIUIActionType =
   | 'open_tab'
@@ -9,7 +9,10 @@ export type AIUIActionType =
   | 'open_activity_history'
   | 'open_create_project'
   | 'open_dashboard'
-  | 'open_project';
+  | 'open_project'
+  | 'open_rental_dashboard'
+  | 'open_construction_dashboard'
+  | 'open_project_settings';
 
 export interface AIUIAction {
   type: AIUIActionType;
@@ -22,6 +25,7 @@ export interface AIUIAction {
     openTaskDetail?: boolean;
     projectId?: string;
     projectName?: string;
+    section?: 'portfolio' | 'bookings' | 'revenue';
   };
 }
 
@@ -33,9 +37,17 @@ const VALID_UI_TYPES = new Set<AIUIActionType>([
   'open_create_project',
   'open_dashboard',
   'open_project',
+  'open_rental_dashboard',
+  'open_construction_dashboard',
+  'open_project_settings',
 ]);
 
-const VALID_TABS = new Set<ProjectTab>(['overview', 'expenses', 'tasks', 'docs']);
+const VALID_TABS = new Set<ProjectTab>(['overview', 'expenses', 'tasks', 'docs', 'gallery', 'rental']);
+
+function normalizeProjectTab(project: Project | null | undefined, tab: ProjectTab): ProjectTab {
+  if (project?.projectType !== 'rental' && tab === 'rental') return 'overview';
+  return tab;
+}
 
 export function sanitizeUIActions(actions: unknown[]): AIUIAction[] {
   if (!Array.isArray(actions)) return [];
@@ -103,7 +115,11 @@ export function resolveProjectId(
   }
   if (params.projectName) {
     const q = params.projectName.toLowerCase();
-    const hit = projects.find((p) => p.name.toLowerCase().includes(q));
+    const hit = projects.find((p) =>
+      [p.name, p.address, p.rentalProperty?.buildingNumber, p.rentalProperty?.ownerName]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(q))
+    );
     if (hit) return hit.id;
   }
   return null;
@@ -116,6 +132,7 @@ export interface PendingAiNav {
   expenseId?: string;
   openActivityHistory?: boolean;
   openTaskDetail?: boolean;
+  openProjectSettings?: boolean;
 }
 
 export interface CompiledAiNavigation {
@@ -127,6 +144,9 @@ export interface CompiledAiNavigation {
   expenseId?: string;
   openActivityHistory?: boolean;
   openTaskDetail?: boolean;
+  openProjectSettings?: boolean;
+  rentalSection?: 'portfolio' | 'bookings' | 'revenue';
+  openConstructionDashboard?: boolean;
 }
 
 /** Merge multiple uiActions into one navigation plan (dashboard + cross-project) */
@@ -144,6 +164,14 @@ export function compileUIActions(
         batch.openDashboard = true;
         target = null;
         break;
+      case 'open_rental_dashboard':
+        batch.rentalSection = action.params.section || 'portfolio';
+        target = null;
+        break;
+      case 'open_construction_dashboard':
+        batch.openConstructionDashboard = true;
+        target = null;
+        break;
       case 'open_create_project':
         batch.openCreateProject = true;
         break;
@@ -156,7 +184,7 @@ export function compileUIActions(
         break;
       }
       case 'open_tab':
-        if (action.params.tab) batch.tab = action.params.tab;
+        if (action.params.tab) batch.tab = normalizeProjectTab(target, action.params.tab);
         break;
       case 'open_task': {
         batch.tab = 'tasks';
@@ -178,6 +206,15 @@ export function compileUIActions(
       case 'open_activity_history':
         batch.openActivityHistory = true;
         break;
+      case 'open_project_settings': {
+        const id = resolveProjectId(projects, action.params) || target?.id;
+        if (id) {
+          batch.projectId = id;
+          batch.openProjectSettings = true;
+          target = projects.find((p) => p.id === id) ?? target;
+        }
+        break;
+      }
       default:
         break;
     }
@@ -197,6 +234,8 @@ export interface AINavigationHandlers {
   openCreateProject?: () => void;
   /** Return to dashboard home (project list) */
   openDashboard?: () => void;
+  openRentalDashboard?: (section: 'portfolio' | 'bookings' | 'revenue') => void;
+  openConstructionDashboard?: () => void;
   /** Select a project workspace */
   onSelectProject?: (projectId: string) => void;
   /** Deferred navigation after project loads */
@@ -217,6 +256,12 @@ export function executeAIUINavigationPlan(
   if (compiled.openDashboard) {
     handlers.openDashboard?.();
   }
+  if (compiled.rentalSection) {
+    handlers.openRentalDashboard?.(compiled.rentalSection);
+  }
+  if (compiled.openConstructionDashboard) {
+    handlers.openConstructionDashboard?.();
+  }
   if (compiled.openCreateProject) {
     handlers.openCreateProject?.();
     window.setTimeout(() => pulseElementById('sidebar-pj-creator-modal'), 320);
@@ -233,7 +278,8 @@ export function executeAIUINavigationPlan(
     compiled.tab ||
     compiled.taskId ||
     compiled.expenseId ||
-    compiled.openActivityHistory;
+    compiled.openActivityHistory ||
+    compiled.openProjectSettings;
 
   if (needsDeferred && targetProjectId) {
     handlers.setPendingAiNav?.({
@@ -243,6 +289,7 @@ export function executeAIUINavigationPlan(
       expenseId: compiled.expenseId,
       openActivityHistory: compiled.openActivityHistory,
       openTaskDetail: compiled.openTaskDetail,
+      openProjectSettings: compiled.openProjectSettings,
     });
     return true;
   }
@@ -254,7 +301,12 @@ export function executeAIUINavigationPlan(
     return true;
   }
 
-  if (compiled.openCreateProject || compiled.openDashboard) return true;
+  if (
+    compiled.openCreateProject ||
+    compiled.openDashboard ||
+    compiled.rentalSection ||
+    compiled.openConstructionDashboard
+  ) return true;
   return !!targetProjectId;
 }
 
@@ -277,11 +329,26 @@ export function executeAIUIAction(action: AIUIAction, handlers: AINavigationHand
       window.setTimeout(() => pulseElementById('sidebar-new-workspace-btn'), 220);
       return true;
     }
+    case 'open_rental_dashboard': {
+      handlers.openRentalDashboard?.(action.params.section || 'portfolio');
+      return true;
+    }
+    case 'open_construction_dashboard': {
+      handlers.openConstructionDashboard?.();
+      return true;
+    }
+    case 'open_project_settings': {
+      const project = handlers.project;
+      if (!project) return false;
+      handlers.setPendingAiNav?.({ projectId: project.id, openProjectSettings: true });
+      return true;
+    }
     case 'open_tab': {
       const tab = action.params.tab;
       if (!tab || !VALID_TABS.has(tab) || !handlers.setActiveTab) return false;
-      handlers.setActiveTab(tab);
-      handlers.flashFocus?.(`project-tab-${tab}`);
+      const targetTab = normalizeProjectTab(handlers.project, tab);
+      handlers.setActiveTab(targetTab);
+      handlers.flashFocus?.(`project-tab-${targetTab}`);
       return true;
     }
     case 'open_task': {

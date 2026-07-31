@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import TopNavbar from './TopNavbar';
 import TaskDetailPanel from './TaskDetailPanel';
 import TaskKanbanBoard from './TaskKanbanBoard';
@@ -7,7 +7,7 @@ import ConfirmDialog, { ConfirmRequest } from './ConfirmDialog';
 import ExpenseReceiptField, { ExpenseReceiptDraft } from './ExpenseReceiptField';
 import ExpenseReceiptThumb from './ExpenseReceiptThumb';
 import { AppLoader, FadeIn } from './ui/AppLoader';
-import { AnimatePresence } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import { 
   Settings,
   Users, 
@@ -29,6 +29,7 @@ import {
   HelpCircle,
   TrendingUp,
   Sliders,
+  ChevronLeft,
   ChevronRight,
   ShieldAlert,
   Search,
@@ -36,9 +37,13 @@ import {
   Moon,
   Sun,
   FileText,
+  Image as ImageIcon,
+  ReceiptText,
   Download,
   Building,
-  Menu
+  Menu,
+  Upload,
+  Loader2
 } from 'lucide-react';
 import { 
   Project, 
@@ -53,15 +58,70 @@ import {
   Invitation,
   ProjectMember,
   DocumentParty,
+  DocumentRecipientKind,
   DocumentKind,
+  DocumentLineColumn,
   DocumentPresetsMap,
   PendingNotificationNav,
   TaskMedia,
   ProjectType,
   RentalBooking,
+  RentalBookingPayment,
+  RentalPaymentMethod,
   RentalBookingStatus,
+  RentalOwnerPayment,
+  Photo,
+  PhotoType,
 } from '../types';
+import {
+  bookingMonthSlice,
+  isOwnerExpense,
+  rentalBookingCommission,
+  rentalBookingCommissionRate,
+  rentalBookingBalanceDue,
+  rentalBookingOpeningBalance,
+  rentalBookingPaidAmount,
+  rentalBookingOverpayment,
+  rentalBookingRate,
+  rentalBookingStatusForDates,
+  rentalDaysBetween,
+  addRentalBookingPayment,
+  removeRentalBookingPayment,
+  syncRentalBookingPaymentTotals,
+} from '../utils/rentalAccounting';
+import { buildRentalPaymentReceiptDraft } from '../utils/rentalPaymentReceipt';
+import { rentalText } from '../utils/rentalTranslations';
+import DatePickerInput from './ui/DatePickerInput';
+
+const EXPENSES_PER_PAGE = 11;
+const GALLERY_ITEMS_PER_PAGE = 12;
+const MAX_GALLERY_BATCH = 10;
+
+type DocumentLineItem = {
+  id: string;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  sourceExpenseId?: string;
+  baseAmount?: number;
+  commissionPercent?: number;
+};
 import { TRANSLATIONS, calculateSettlements } from '../utils/mockData';
+
+const EXPORT_COLUMNS = [
+  { key: 'date', labelEn: 'Date', labelFr: 'Date', labelAr: 'التاريخ' },
+  { key: 'title', labelEn: 'Title', labelFr: 'Titre', labelAr: 'العنوان' },
+  { key: 'description', labelEn: 'Description', labelFr: 'Description', labelAr: 'الوصف' },
+  { key: 'supplier', labelEn: 'Supplier', labelFr: 'Fournisseur', labelAr: 'المورد' },
+  { key: 'category', labelEn: 'Category', labelFr: 'Catégorie', labelAr: 'الفئة' },
+  { key: 'amount', labelEn: 'Cost Amount', labelFr: 'Montant', labelAr: 'المبلغ' },
+  { key: 'commission', labelEn: 'Commission %', labelFr: 'Commission %', labelAr: 'العمولة' },
+  { key: 'invoicePrice', labelEn: 'Invoice Price', labelFr: 'Prix Facture', labelAr: 'سعر الفاتورة' },
+  { key: 'paidBy', labelEn: 'Paid By', labelFr: 'Payé Par', labelAr: 'الدافع' },
+  { key: 'currency', labelEn: 'Currency', labelFr: 'Devise', labelAr: 'العملة' },
+  { key: 'notes', labelEn: 'Notes', labelFr: 'Notes', labelAr: 'ملاحظات' },
+  { key: 'section', labelEn: 'Section', labelFr: 'Section', labelAr: 'القسم' },
+];
 import {
   loadDocumentParties,
   upsertDocumentParty,
@@ -101,10 +161,20 @@ import {
   deleteStorageFile,
   stripTaskMediaUrlsForSave,
   formatMediaUploadError,
+  resolveTaskMediaUrl,
+  uploadProjectGalleryImage,
+  isUsingFirestoreMedia,
 } from '../lib/storage';
+import {
+  compressImageFile,
+  compressImageForSparkPlan,
+  formatFileSize,
+} from '../utils/imageCompression';
 
 interface ProjectDetailProps {
   projectId: string;
+  openSettingsOnLoad?: boolean;
+  onOpenSettingsConsumed?: () => void;
   onBack: () => void;
   language: Language;
   onLanguageChange: (lang: Language) => void;
@@ -127,6 +197,8 @@ interface ProjectDetailProps {
 
 export default function ProjectDetail({ 
   projectId, 
+  openSettingsOnLoad = false,
+  onOpenSettingsConsumed,
   onBack, 
   language,
   onLanguageChange,
@@ -153,7 +225,13 @@ export default function ProjectDetail({
   const [projectActivities, setProjectActivities] = useState<TimelineActivity[]>([]);
   
   // Tab Switcher state
-  const [activeTab, setActiveTab] = useState<'overview' | 'expenses' | 'tasks' | 'docs' | 'rental'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'expenses' | 'tasks' | 'docs' | 'gallery' | 'rental'>('overview');
+  const [resolvedGalleryUrls, setResolvedGalleryUrls] = useState<Record<string, string>>({});
+  const [galleryPage, setGalleryPage] = useState(1);
+  const [galleryPhotoType, setGalleryPhotoType] = useState<PhotoType>('progress');
+  const [galleryUploadBusy, setGalleryUploadBusy] = useState(false);
+  const [galleryUploadStatus, setGalleryUploadStatus] = useState('');
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // Modal displays
   const [showAddExpense, setShowAddExpense] = useState(false);
@@ -211,20 +289,26 @@ export default function ProjectDetail({
     },
   } as const;
 
-  const cl = <K extends keyof typeof confirmLabels>(key: K) => confirmLabels[key][language];
+  const cl = <K extends keyof typeof confirmLabels>(key: K) =>
+    confirmLabels[key][language] as (typeof confirmLabels)[K][Language];
 
   // Add Expense form states
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseDesc, setExpenseDesc] = useState('');
   const [expenseAmount, setExpenseAmount] = useState<number>(0);
+  const [expenseCommission, setExpenseCommission] = useState<number>(0);
   const [expenseCat, setExpenseCat] = useState<ExpenseCategory>('materials');
   const [expensePaidBy, setExpensePaidBy] = useState('');
   const [expenseSupplier, setExpenseSupplier] = useState('');
   const [expenseNotes, setExpenseNotes] = useState('');
   const [expenseDate, setExpenseDate] = useState('');
+  const [expenseRentalChargeTo, setExpenseRentalChargeTo] = useState<NonNullable<Expense['rentalChargeTo']>>('owner');
+  const [expenseRentalBookingId, setExpenseRentalBookingId] = useState('');
   const [expenseReceiptDraft, setExpenseReceiptDraft] = useState<ExpenseReceiptDraft | null>(null);
   const [removeExpenseReceipt, setRemoveExpenseReceipt] = useState(false);
   const [expenseSaving, setExpenseSaving] = useState(false);
+  const [showExportPicker, setShowExportPicker] = useState(false);
+  const [selectedExportCols, setSelectedExportCols] = useState<Set<string>>(new Set(['date', 'title', 'category', 'amount', 'paidBy']));
 
   const [showReimbursementModal, setShowReimbursementModal] = useState(false);
   const [editingReimbursementId, setEditingReimbursementId] = useState<string | null>(null);
@@ -251,9 +335,12 @@ export default function ProjectDetail({
     setExpenseTitle('');
     setExpenseDesc('');
     setExpenseAmount(0);
+    setExpenseCommission(0);
     setExpenseSupplier('');
     setExpenseNotes('');
     setExpenseDate('');
+    setExpenseRentalChargeTo('owner');
+    setExpenseRentalBookingId('');
     setEditingExpenseId(null);
     setRemoveExpenseReceipt(false);
   }, []);
@@ -281,11 +368,14 @@ export default function ProjectDetail({
     setExpenseTitle(exp.title);
     setExpenseDesc(exp.description === 'No details provided.' ? '' : exp.description);
     setExpenseAmount(exp.amount);
+    setExpenseCommission(exp.commissionPercent || 0);
     setExpenseCat(exp.category);
     setExpensePaidBy(exp.paidBy);
     setExpenseSupplier(exp.supplier === t.dashboard ? '' : exp.supplier);
     setExpenseNotes(exp.notes || '');
     setExpenseDate(exp.date);
+    setExpenseRentalChargeTo(exp.rentalChargeTo || 'owner');
+    setExpenseRentalBookingId(exp.rentalBookingId || '');
     setShowAddExpense(true);
   }, [resetExpenseForm, t.dashboard]);
 
@@ -321,11 +411,19 @@ export default function ProjectDetail({
   const [editCurrency, setEditCurrency] = useState('');
   const [editStatus, setEditStatus] = useState<Project['status']>('in_progress');
   const [editProjectType, setEditProjectType] = useState<ProjectType>('construction');
+  const [editRentalOwnerName, setEditRentalOwnerName] = useState('');
+  const [editRentalOwnerPhone, setEditRentalOwnerPhone] = useState('');
+  const [editRentalOwnerEmail, setEditRentalOwnerEmail] = useState('');
+  const [editRentalBuildingNumber, setEditRentalBuildingNumber] = useState('');
+  const [editRentalPricePerNight, setEditRentalPricePerNight] = useState(0);
+  const [editRentalCommissionRate, setEditRentalCommissionRate] = useState(10);
+  const [editRentalNotes, setEditRentalNotes] = useState('');
 
   // Expense search & filters
   const [expenseQuery, setExpenseQuery] = useState('');
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<string>('all');
   const [expensePaidByFilter, setExpensePaidByFilter] = useState<string>('all');
+  const [expensePage, setExpensePage] = useState(1);
 
   // Intelligent dynamic Invoice / Recu / Bon generator states
   const [docType, setDocType] = useState<DocumentKind>('invoice');
@@ -335,7 +433,7 @@ export default function ProjectDetail({
   const [docDate, setDocDate] = useState(new Date().toISOString().split('T')[0]);
   const [docDueDate, setDocDueDate] = useState(new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
   const [docLogo, setDocLogo] = useState<string | null>(null);
-  const [docPaperFormat, setDocPaperFormat] = useState<'A4' | 'A5'>(DEFAULT_DOC_PRESETS.invoice.paperFormat);
+  const [docPaperFormat, setDocPaperFormat] = useState<'A4'>('A4');
 
   const [docSenderName, setDocSenderName] = useState('');
   const [docSenderEmail, setDocSenderEmail] = useState('');
@@ -350,39 +448,119 @@ export default function ProjectDetail({
 
   const [docTaxRate, setDocTaxRate] = useState<number>(DEFAULT_DOC_PRESETS.invoice.taxRate);
   const [docNotes, setDocNotes] = useState('');
+  const [docVisibleColumns, setDocVisibleColumns] = useState<DocumentLineColumn[]>(DEFAULT_DOC_PRESETS.invoice.visibleColumns);
 
   // Items included in the printed sheet
-  const [docItems, setDocItems] = useState<{ id: string; description: string; quantity: number; unitPrice: number }[]>([]);
+  const [docItems, setDocItems] = useState<DocumentLineItem[]>([]);
 
   // Item builder fields
   const [newItemDesc, setNewItemDesc] = useState('');
   const [newItemQty, setNewItemQty] = useState(1);
   const [newItemPrice, setNewItemPrice] = useState(0);
 
+  const docSubtotal = docItems.reduce((total, item) => total + item.quantity * item.unitPrice, 0);
+  const docTotal = docSubtotal * (1 + docTaxRate / 100);
+
+  const exportPickerRef = useRef<HTMLDivElement>(null);
+
   const handleToggleExpenseIntoDoc = (expense: Expense) => {
-    const exists = docItems.find(item => item.id === expense.id || item.description.includes(expense.title));
+    const exists = docItems.find(item => item.sourceExpenseId === expense.id || item.id === expense.id);
     if (exists) {
-      setDocItems(docItems.filter(item => item.id !== expense.id && !item.description.includes(expense.title)));
+      setDocItems(docItems.filter(item => item.sourceExpenseId !== expense.id && item.id !== expense.id));
     } else {
+      const commissionPercent = Math.max(0, expense.commissionPercent || 0);
       const parsedItem = {
         id: expense.id,
         description: `${expense.title} (${language === 'en' ? 'Ref expense' : language === 'fr' ? 'Réf' : 'المرجع'}${expense.supplier ? ` - ${expense.supplier}` : ''})`,
         quantity: 1,
-        unitPrice: expense.amount
+        unitPrice: expense.amount * (1 + commissionPercent / 100),
+        sourceExpenseId: expense.id,
+        baseAmount: expense.amount,
+        commissionPercent,
       };
       setDocItems([...docItems, parsedItem]);
     }
+  };
+
+  useClickOutside(exportPickerRef, () => setShowExportPicker(false), showExportPicker);
+
+  const handleExportExpensesExcel = () => {
+    const colsOrder = ['date', 'title', 'description', 'supplier', 'category', 'amount', 'commission', 'invoicePrice', 'paidBy', 'currency', 'notes', 'section'];
+    const activeCols = colsOrder.filter(c => selectedExportCols.has(c));
+    const colLabels = activeCols.map(k => {
+      const col = EXPORT_COLUMNS.find(c => c.key === k)!;
+      return language === 'en' ? col.labelEn : language === 'fr' ? col.labelFr : col.labelAr;
+    });
+
+    const rows: (string | number)[][] = [colLabels];
+    for (const exp of filteredExpenses) {
+      const sectionTitle = exp.sectionId ? project.sections.find(s => s.id === exp.sectionId)?.title || '' : '';
+      const payerName = project.members.find(m => m.email === exp.paidBy)?.name || exp.paidBy;
+      const invoicePrice = exp.commissionPercent ? exp.amount + (exp.amount * exp.commissionPercent / 100) : exp.amount;
+      const row: (string | number)[] = [];
+      for (const k of activeCols) {
+        switch (k) {
+          case 'date': row.push(exp.date); break;
+          case 'title': row.push(exp.title); break;
+          case 'description': row.push(exp.description === 'No details provided.' ? '' : exp.description); break;
+          case 'supplier': row.push(exp.supplier); break;
+          case 'category': row.push(t.categories[exp.category]); break;
+          case 'amount': row.push(exp.amount); break;
+          case 'commission': row.push(exp.commissionPercent || 0); break;
+          case 'invoicePrice': row.push(invoicePrice); break;
+          case 'paidBy': row.push(payerName); break;
+          case 'currency': row.push(project.currency); break;
+          case 'notes': row.push(exp.notes || ''); break;
+          case 'section': row.push(sectionTitle); break;
+          default: row.push(''); break;
+        }
+      }
+      rows.push(row);
+    }
+
+    const escapeCsvCell = (value: string | number) =>
+      `"${String(value).replace(/"/g, '""')}"`;
+    const csv = rows.map((row) => row.map(escapeCsvCell).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' });
+    const downloadUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = `${project.name.replace(/[^a-zA-Z0-9]/g, '_')}_expenses.csv`;
+    anchor.click();
+    URL.revokeObjectURL(downloadUrl);
+    setShowExportPicker(false);
   };
 
   const handleRemoveDocItem = (id: string) => {
     setDocItems(docItems.filter(item => item.id !== id));
   };
 
+  const updateDocItem = (id: string, patch: Partial<DocumentLineItem>) => {
+    setDocItems((items) => items.map((item) => item.id === id ? { ...item, ...patch } : item));
+  };
+
+  const updateDocumentItemCommission = (id: string, commissionPercent: number) => {
+    setDocItems((items) => items.map((item) => {
+      if (item.id !== id) return item;
+      const rate = Math.max(0, commissionPercent || 0);
+      const baseAmount = item.baseAmount ?? item.unitPrice;
+      return { ...item, baseAmount, commissionPercent: rate, unitPrice: baseAmount * (1 + rate / 100) };
+    }));
+  };
+
+  const toggleDocumentColumn = (column: DocumentLineColumn) => {
+    const visibleColumns = docVisibleColumns.includes(column)
+      ? docVisibleColumns.filter((value) => value !== column)
+      : [...docVisibleColumns, column];
+    setDocVisibleColumns(visibleColumns);
+    persistCurrentDocPreset({ visibleColumns });
+  };
+
   const handleSaveDocumentAsPdf = useCallback(() => {
     const typeLabel =
       docType === 'invoice' ? 'Invoice' : docType === 'voucher' ? 'Voucher' : 'Receipt';
-    saveCivilDocumentAsPdf(docPaperFormat, `${typeLabel}_${docNumber || 'document'}`);
-  }, [docType, docNumber, docPaperFormat]);
+    saveCivilDocumentAsPdf(`${typeLabel}_${docNumber || 'document'}`);
+  }, [docType, docNumber]);
 
   /** Persist per-document-type preset (tax, notes, paper) for the active type */
   const persistCurrentDocPreset = useCallback(
@@ -403,6 +581,7 @@ export default function ProjectDetail({
           taxRate: docTaxRate,
           defaultNotes: docNotes,
           paperFormat: docPaperFormat,
+          visibleColumns: docVisibleColumns,
         });
         setDocPresets(presets);
         saveDocumentPresets(user.uid, presets);
@@ -412,9 +591,10 @@ export default function ProjectDetail({
       setDocNumber(generateDocNumber(preset.prefix));
       setDocTaxRate(preset.taxRate);
       setDocNotes(preset.defaultNotes);
-      setDocPaperFormat(preset.paperFormat);
+      setDocPaperFormat('A4');
+      setDocVisibleColumns(preset.visibleColumns);
     },
-    [user?.uid, docPresets, docType, docTaxRate, docNotes, docPaperFormat]
+    [user?.uid, docPresets, docType, docTaxRate, docNotes, docPaperFormat, docVisibleColumns]
   );
 
   const handleSaveDocumentParty = (role: 'issuer' | 'recipient', label: string) => {
@@ -456,7 +636,8 @@ export default function ProjectDetail({
     setDocNumber(generateDocNumber(initial.prefix));
     setDocTaxRate(initial.taxRate);
     setDocNotes(initial.defaultNotes);
-    setDocPaperFormat(initial.paperFormat);
+    setDocPaperFormat('A4');
+    setDocVisibleColumns(initial.visibleColumns);
   }, [user?.uid]);
 
   useEffect(() => {
@@ -476,6 +657,13 @@ export default function ProjectDetail({
         setEditCurrency(found.currency);
         setEditStatus(found.status);
         setEditProjectType(found.projectType || 'construction');
+        setEditRentalOwnerName(found.rentalProperty?.ownerName || found.clientName || '');
+        setEditRentalOwnerPhone(found.rentalProperty?.ownerPhone || '');
+        setEditRentalOwnerEmail(found.rentalProperty?.ownerEmail || '');
+        setEditRentalBuildingNumber(found.rentalProperty?.buildingNumber || found.address || '');
+        setEditRentalPricePerNight(found.rentalProperty?.pricePerNight || 0);
+        setEditRentalCommissionRate(found.rentalProperty?.commissionRate ?? 10);
+        setEditRentalNotes(found.rentalProperty?.notes || '');
 
         // Prep form select defaults
         if (found.members.length > 0) {
@@ -502,10 +690,16 @@ export default function ProjectDetail({
   }, [project, user?.uid]);
 
   useEffect(() => {
-    if (!projectId) return;
-    const unsub = subscribeToActivities(projectId, setProjectActivities);
+    if (project?.projectType !== 'rental' && activeTab === 'rental') {
+      setActiveTab('overview');
+    }
+  }, [project?.projectType, activeTab]);
+
+  useEffect(() => {
+    if (!projectId || !user?.email) return;
+    const unsub = subscribeToActivities(projectId, user.email, setProjectActivities);
     return () => unsub();
-  }, [projectId]);
+  }, [projectId, user?.email]);
 
   /** Fill Invoices & Vouchers tab from AI draft, then open for review/print */
   const applyDocumentDraftFromAI = useCallback(
@@ -566,14 +760,29 @@ export default function ProjectDetail({
       window.setTimeout(() => flashAiFocus(`expense-row-${pendingAiNav.expenseId}`), 350);
     }
     if (pendingAiNav.openActivityHistory) setShowActivityHistory(true);
+    if (
+      pendingAiNav.openProjectSettings &&
+      getProjectPermissions(resolveUserRole(project, user?.email || '')).canModifySettings
+    ) {
+      setShowSettings(true);
+    }
     onPendingAiNavConsumed?.();
-  }, [pendingAiNav, projectId, project, onPendingAiNavConsumed, flashAiFocus]);
+  }, [pendingAiNav, projectId, project, user?.email, onPendingAiNavConsumed, flashAiFocus]);
 
   useEffect(() => {
     if (!pendingDocumentDraft || !project) return;
     applyDocumentDraftFromAI(pendingDocumentDraft);
     onPendingDocumentDraftConsumed?.();
-  }, [pendingDocumentDraft, project, applyDocumentDraftFromAI, onPendingDocumentDraftConsumed]);
+    if (pendingDocumentDraft.autoExport) {
+      window.setTimeout(handleSaveDocumentAsPdf, 450);
+    }
+  }, [
+    pendingDocumentDraft,
+    project,
+    applyDocumentDraftFromAI,
+    handleSaveDocumentAsPdf,
+    onPendingDocumentDraftConsumed,
+  ]);
 
   /** Open the right tab/task when user clicks a notification */
   useEffect(() => {
@@ -591,6 +800,96 @@ export default function ProjectDetail({
     }
     onPendingNavConsumed?.();
   }, [pendingNav, projectId, project, onPendingNavConsumed]);
+
+  useEffect(() => {
+    if (!openSettingsOnLoad || !project || !user?.email) return;
+    const role = resolveUserRole(project, user.email);
+    if (getProjectPermissions(role).canModifySettings) {
+      setShowSettings(true);
+    }
+    onOpenSettingsConsumed?.();
+  }, [openSettingsOnLoad, project, user?.email, onOpenSettingsConsumed]);
+
+  const galleryItems = useMemo(() => {
+    if (!project) return [];
+
+    const projectItems = (project.photos || []).map((photo) => ({
+      id: `project_${photo.id}`,
+      photoId: photo.id,
+      title: photo.title,
+      category: photo.type,
+      date: photo.uploadDate,
+      url: photo.url,
+      storagePath: photo.storagePath || '',
+      taskTitle: '',
+      isProjectPhoto: true,
+    }));
+    const taskItems = project.tasks.flatMap((task) =>
+      ([
+        ['before', task.beforeImages || []],
+        ['progress', task.progressImages || []],
+        ['after', task.afterImages || []],
+      ] as const).flatMap(([category, media]) =>
+        media.map((item) => ({
+          id: `${task.id}_${category}_${item.id}`,
+          photoId: '',
+          title: item.caption || item.originalName || task.title,
+          category,
+          date: item.uploadDate,
+          url: item.url || '',
+          storagePath: item.storagePath,
+          taskTitle: task.title,
+          isProjectPhoto: false,
+        }))
+      )
+    );
+
+    return [...projectItems, ...taskItems].sort((left, right) =>
+      String(right.date || '').localeCompare(String(left.date || ''))
+    );
+  }, [project]);
+
+  const galleryPageCount = Math.max(1, Math.ceil(galleryItems.length / GALLERY_ITEMS_PER_PAGE));
+  const visibleGalleryItems = useMemo(() => {
+    const start = (galleryPage - 1) * GALLERY_ITEMS_PER_PAGE;
+    return galleryItems.slice(start, start + GALLERY_ITEMS_PER_PAGE);
+  }, [galleryItems, galleryPage]);
+
+  useEffect(() => {
+    if (galleryPage > galleryPageCount) setGalleryPage(galleryPageCount);
+  }, [galleryPage, galleryPageCount]);
+
+  useEffect(() => {
+    if (activeTab !== 'gallery') return;
+    let cancelled = false;
+    const unresolved = visibleGalleryItems.filter(
+      (item) =>
+        item.storagePath &&
+        !item.url &&
+        !Object.prototype.hasOwnProperty.call(resolvedGalleryUrls, item.id)
+    );
+    if (unresolved.length === 0) return;
+
+    Promise.all(
+      unresolved.map(async (item) => ({
+        id: item.id,
+        url: await resolveTaskMediaUrl(item.storagePath, item.url).catch(() => ''),
+      }))
+    ).then((resolved) => {
+      if (cancelled) return;
+      setResolvedGalleryUrls((current) => {
+        const next = { ...current };
+        for (const item of resolved) {
+          next[item.id] = item.url;
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, visibleGalleryItems, resolvedGalleryUrls]);
 
   if (!project) {
     return (
@@ -632,7 +931,17 @@ export default function ProjectDetail({
   const { totalSpent, paidMap, expectedShares, settlements } = calculateSettlements(project);
 
   const hasBudget = project.projectType === 'construction' && project.budget > 0;
+  // Construction and rental workspaces track project finances, not personal debt settlements.
+  // Legacy service data remains preserved, but it is the only historical context that can expose this UI.
+  const isSettlementWorkspace = project.projectType === 'service';
   const percentSpent = hasBudget ? Math.round((totalSpent / project.budget) * 100) : 0;
+  const rentalBookings = project.rentalBookings || [];
+  const rentalRevenue = rentalBookings.reduce((s, b) => s + b.totalAmount, 0);
+  const rentalCommission = rentalBookings.reduce((s, b) => s + b.commission, 0);
+  const rentalOwnerPayout = rentalBookings.reduce((s, b) => s + b.ownerPayout, 0);
+  const rentalPaid = rentalBookings.reduce((s, b) => s + rentalBookingPaidAmount(b), 0);
+  const rentalBalanceDue = rentalBookings.reduce((s, b) => s + rentalBookingBalanceDue(b), 0);
+  const rentalNetOwner = rentalOwnerPayout - totalSpent;
 
   const userEmail = (user?.email || '').toLowerCase();
   const userRole = resolveUserRole(project, userEmail);
@@ -711,6 +1020,135 @@ export default function ProjectDetail({
     } catch (e) {
       console.error(e);
     }
+  };
+
+  const handleGalleryUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selected: File[] = event.target.files ? Array.from(event.target.files) : [];
+    event.target.value = '';
+    if (selected.length === 0) return;
+    if (!perm.canUploadTaskMedia) {
+      denyWrite('upload project photos');
+      return;
+    }
+
+    const files = selected.filter((file) => file.type.startsWith('image/')).slice(0, MAX_GALLERY_BATCH);
+    if (files.length === 0) {
+      showAlert('Unsupported files', 'Please select JPG, PNG, WEBP, or other image files.');
+      return;
+    }
+    if ((project.photos || []).length + files.length > 500) {
+      showAlert('Gallery limit reached', 'A project can contain up to 500 project-level photos.');
+      return;
+    }
+
+    setGalleryUploadBusy(true);
+    const uploaded: Array<{ photo: Photo; displayUrl: string }> = [];
+    try {
+      if (user?.uid) await syncProjectAccessFieldsIfNeeded(user.uid, project);
+
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setGalleryUploadStatus(
+          `${language === 'fr' ? 'Compression' : language === 'ar' ? 'ضغط' : 'Compressing'} ${index + 1}/${files.length}: ${file.name}`
+        );
+        const compressed = isUsingFirestoreMedia()
+          ? await compressImageForSparkPlan(file)
+          : await compressImageFile(file);
+        setGalleryUploadStatus(
+          `${language === 'fr' ? 'Envoi' : language === 'ar' ? 'رفع' : 'Uploading'} ${index + 1}/${files.length} (${formatFileSize(compressed.compressedSize)})`
+        );
+        const result = await uploadProjectGalleryImage(
+          project.id,
+          compressed.blob,
+          compressed.fileName,
+          compressed.blob.type || 'image/jpeg'
+        );
+        const photoId = `photo_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 6)}`;
+        uploaded.push({
+          photo: {
+            id: photoId,
+            title: file.name.replace(/\.[^.]+$/, '') || 'Project photo',
+            url: isUsingFirestoreMedia() ? '' : result.url,
+            storagePath: result.storagePath,
+            sizeBytes: result.sizeBytes,
+            originalName: file.name,
+            type: galleryPhotoType,
+            comments: [],
+            tags: [],
+            uploadDate: new Date().toISOString(),
+          },
+          displayUrl: result.url,
+        });
+      }
+
+      const ok = await syncProjectChanges({
+        ...project,
+        photos: [...(project.photos || []), ...uploaded.map(({ photo }) => photo)],
+      });
+      if (!ok) {
+        await Promise.all(uploaded.map(({ photo }) => deleteStorageFile(photo.storagePath || '')));
+        return;
+      }
+
+      setResolvedGalleryUrls((current) => {
+        const next = { ...current };
+        uploaded.forEach(({ photo, displayUrl }) => {
+          next[`project_${photo.id}`] = displayUrl;
+        });
+        return next;
+      });
+      setGalleryPage(1);
+      setGalleryUploadStatus(
+        language === 'fr'
+          ? `${uploaded.length} photo(s) enregistrée(s)`
+          : language === 'ar'
+            ? `تم حفظ ${uploaded.length} صورة`
+            : `${uploaded.length} photo${uploaded.length === 1 ? '' : 's'} saved`
+      );
+      await trackActivity(
+        'photo_uploaded',
+        `Uploaded ${uploaded.length} project photo${uploaded.length === 1 ? '' : 's'}.`,
+        { targetType: 'project', targetId: project.id, targetTitle: project.name }
+      );
+    } catch (error) {
+      await Promise.all(uploaded.map(({ photo }) => deleteStorageFile(photo.storagePath || '')));
+      setGalleryUploadStatus(formatMediaUploadError(error));
+    } finally {
+      setGalleryUploadBusy(false);
+      window.setTimeout(() => setGalleryUploadStatus(''), 5000);
+    }
+  };
+
+  const promptDeleteGalleryPhoto = (photoId: string) => {
+    const photo = (project.photos || []).find((item) => item.id === photoId);
+    if (!photo) return;
+    requestConfirm({
+      title:
+        language === 'fr'
+          ? 'Supprimer la photo'
+          : language === 'ar'
+            ? 'حذف الصورة'
+            : 'Delete photo',
+      message:
+        language === 'fr'
+          ? `Supprimer définitivement « ${photo.title} » de ce projet ?`
+          : language === 'ar'
+            ? `هل تريد حذف "${photo.title}" نهائيا من هذا المشروع؟`
+            : `Permanently remove "${photo.title}" from this project?`,
+      onConfirm: async () => {
+        const ok = await syncProjectChanges({
+          ...project,
+          photos: (project.photos || []).filter((item) => item.id !== photoId),
+        });
+        if (!ok) return;
+        if (photo.storagePath) await deleteStorageFile(photo.storagePath);
+        setResolvedGalleryUrls((current) => {
+          const next = { ...current };
+          delete next[`project_${photoId}`];
+          return next;
+        });
+      },
+    });
   };
 
   const memberDisplayName = (email: string) =>
@@ -817,6 +1255,7 @@ export default function ProjectDetail({
         title: expenseTitle.trim(),
         description: expenseDesc.trim() || 'No details provided.',
         amount: Number(expenseAmount),
+        commissionPercent: expenseCommission > 0 ? expenseCommission : undefined,
         currency: project.currency,
         category: expenseCat,
         date: expenseDate || new Date().toISOString().split('T')[0],
@@ -829,6 +1268,8 @@ export default function ProjectDetail({
         receipts: existing?.receipts || [],
         ...(receiptFiles.length > 0 ? { receiptFiles: stripTaskMediaUrlsForSave(receiptFiles) } : {}),
         ...(expenseNotes.trim() ? { notes: expenseNotes.trim() } : {}),
+        ...(project.projectType === 'rental' ? { rentalChargeTo: expenseRentalChargeTo } : {}),
+        ...(project.projectType === 'rental' && expenseRentalBookingId ? { rentalBookingId: expenseRentalBookingId } : {}),
         createdBy: existing?.createdBy || userEmail,
         createdByName: existing?.createdByName || user?.displayName || memberDisplayName(userEmail),
       };
@@ -1364,7 +1805,24 @@ export default function ProjectDetail({
       budget: newBudget,
       currency: editCurrency || 'DH',
       status: editStatus,
-      projectType: newProjectType
+      projectType: newProjectType,
+      ...(newProjectType === 'rental'
+        ? {
+            rentalProperty: {
+              ownerName: editRentalOwnerName || editClient || project.rentalProperty?.ownerName || 'N/A',
+              ownerPhone: editRentalOwnerPhone,
+              ownerEmail: editRentalOwnerEmail.trim().toLowerCase(),
+              buildingNumber: editRentalBuildingNumber || editAddress || editName,
+              pricePerNight: Number(editRentalPricePerNight) || 0,
+              commissionRate: Number(editRentalCommissionRate) || 0,
+              notes: editRentalNotes,
+            },
+            rentalBookings: project.rentalBookings || [],
+          }
+        : {
+            rentalProperty: null as any,
+            rentalBookings: [],
+          }),
     };
 
     const ok = await syncProjectChanges(updated);
@@ -1386,9 +1844,18 @@ export default function ProjectDetail({
 
     return qMatches && cMatches && pMatches;
   });
+  const expensePageCount = Math.max(1, Math.ceil(filteredExpenses.length / EXPENSES_PER_PAGE));
+  const activeExpensePage = Math.min(expensePage, expensePageCount);
+  const visibleExpenses = filteredExpenses.slice(
+    (activeExpensePage - 1) * EXPENSES_PER_PAGE,
+    activeExpensePage * EXPENSES_PER_PAGE
+  );
 
   return (
-    <div className="flex min-h-full w-full flex-col font-sans" id="project-workspace">
+    <div
+      className="flex min-h-full w-full flex-col font-sans"
+      id="project-workspace"
+    >
       <TopNavbar
         language={language}
         onLanguageChange={onLanguageChange}
@@ -1556,11 +2023,11 @@ export default function ProjectDetail({
       </div>
 
       {/* Tabs navigation list with Shadcn styles */}
-      <div className="flex border-b border-slate-200 dark:border-slate-800 mt-8 gap-4 mb-6">
+      <div className="mb-6 mt-8 flex max-w-full gap-4 overflow-x-auto border-b border-slate-200 pb-px dark:border-slate-800">
         <button
           id="project-tab-overview"
           onClick={() => setActiveTab('overview')}
-          className={`pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'overview' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
@@ -1571,7 +2038,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-expenses"
           onClick={() => setActiveTab('expenses')}
-          className={`pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'expenses' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
@@ -1582,7 +2049,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-tasks"
           onClick={() => setActiveTab('tasks')}
-          className={`pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'tasks' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
@@ -1593,7 +2060,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-docs"
           onClick={() => setActiveTab('docs')}
-          className={`pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'docs' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
@@ -1601,16 +2068,30 @@ export default function ProjectDetail({
         >
           {language === 'en' ? 'Invoices & Vouchers' : language === 'fr' ? 'Factures & Bons' : 'فواتير وإيصالات'}
         </button>
+        {project?.projectType === 'construction' && (
+        <button
+          id="project-tab-gallery"
+          onClick={() => setActiveTab('gallery')}
+          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+            activeTab === 'gallery'
+              ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white'
+              : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
+          } ${aiFocusId === 'project-tab-gallery' ? 'project-tab-ai-focus' : ''}`}
+        >
+          {language === 'en' ? 'Gallery' : language === 'fr' ? 'Galerie' : 'المعرض'}
+        </button>
+        )}
         {project?.projectType === 'rental' && (
         <button
           id="project-tab-rental"
           onClick={() => setActiveTab('rental')}
-          className={`pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-2 text-[0px] font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'rental' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
           } ${aiFocusId === 'project-tab-rental' ? 'project-tab-ai-focus' : ''}`}
         >
+          <span className="text-xs">{t.rental.bookings}</span>
           {language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'الإيجارات'}
         </button>
         )}
@@ -1623,6 +2104,7 @@ export default function ProjectDetail({
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* Members / Who Paid What Visual Progress Bars (2 cols wide on large) */}
+          {project.projectType !== 'service' && (
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 p-5 rounded-xl">
               <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center justify-between mb-4">
@@ -1672,6 +2154,7 @@ export default function ProjectDetail({
                         {/* Financial summary: Paid vs Balance owed */}
                         <div className="text-right">
                           <span className="font-semibold font-mono text-slate-900 dark:text-white">{amtPaid.toLocaleString()} {project.currency}</span>
+                          {isSettlementWorkspace && (
                           <span className="text-[10px] text-slate-400 block font-sans">
                             {balance >= 0 ? (
                               <span className="text-emerald-600 font-bold flex items-center justify-end gap-0.5">
@@ -1683,6 +2166,7 @@ export default function ProjectDetail({
                               </span>
                             )}
                           </span>
+                          )}
                         </div>
                       </div>
 
@@ -1700,7 +2184,7 @@ export default function ProjectDetail({
             </div>
 
             {/* Past recorded Settlement Reimbursements */}
-            {(project.reimbursements && project.reimbursements.length > 0) && (
+            {(isSettlementWorkspace && project.reimbursements && project.reimbursements.length > 0) && (
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 rounded-xl">
                 <h3 className="font-bold text-sm text-slate-905 dark:text-white flex items-center gap-1.5 mb-3">
                   <CreditCard className="w-4 h-4 text-emerald-500" />
@@ -1746,10 +2230,12 @@ export default function ProjectDetail({
               </div>
             )}
           </div>
+          )}
 
           {/* Right Column: Smart Splitwise Settlement Advice */}
           <div className="space-y-6">
             {/* Settlements Solver Box */}
+            {isSettlementWorkspace && (
             <div className="bg-white dark:bg-slate-900 text-slate-950 dark:text-white rounded-xl p-5 border border-slate-200 dark:border-slate-805 relative shadow-md">
               <h3 className="font-bold text-sm flex items-center gap-1.5 mb-4 text-slate-900 dark:text-white">
                 <CreditCard className="w-4 h-4 text-sky-500 dark:text-sky-400" />
@@ -1802,6 +2288,7 @@ export default function ProjectDetail({
                 </div>
               )}
             </div>
+            )}
 
             {/* Inline Partner Manager Box */}
             <div ref={addMemberPanelRef} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 p-5 rounded-xl mt-6">
@@ -1991,6 +2478,47 @@ export default function ProjectDetail({
                     <span>{language === 'en' ? 'Add Expense' : language === 'fr' ? 'Ajouter dépense' : 'إضافة مصروف'}</span>
                   </button>
                 )}
+                <div className="relative" ref={exportPickerRef}>
+                  <button
+                    onClick={() => setShowExportPicker(!showExportPicker)}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>{language === 'en' ? 'Export Excel' : language === 'fr' ? 'Exporter Excel' : 'تصدير إكسل'}</span>
+                  </button>
+                  {showExportPicker && (
+                    <div className="absolute right-0 top-full mt-1 z-50 w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">{language === 'en' ? 'Columns to export' : language === 'fr' ? 'Colonnes à exporter' : 'الأعمدة للتصدير'}</p>
+                      <div className="space-y-1 max-h-60 overflow-y-auto">
+                        {EXPORT_COLUMNS.map(col => {
+                          const checked = selectedExportCols.has(col.key);
+                          return (
+                            <label key={col.key} className="flex items-center gap-2 px-1 py-1 rounded hover:bg-slate-50 dark:hover:bg-slate-850 cursor-pointer text-xs">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  const next = new Set(selectedExportCols);
+                                  if (next.has(col.key)) next.delete(col.key); else next.add(col.key);
+                                  setSelectedExportCols(next);
+                                }}
+                                className="rounded border-slate-300 dark:border-slate-700"
+                              />
+                              <span className="text-slate-700 dark:text-slate-300">{language === 'en' ? col.labelEn : language === 'fr' ? col.labelFr : col.labelAr}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <button
+                        onClick={handleExportExpensesExcel}
+                        disabled={selectedExportCols.size === 0}
+                        className="mt-2 w-full px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 dark:disabled:bg-slate-700 text-white transition-all cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        {language === 'en' ? 'Download Excel' : language === 'fr' ? 'Télécharger Excel' : 'تحميل إكسل'}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -2005,7 +2533,7 @@ export default function ProjectDetail({
                   type="text"
                   placeholder={language === 'en' ? "Search item name or supplier..." : language === 'fr' ? "Rechercher..." : "البحث عن..."}
                   value={expenseQuery}
-                  onChange={(e) => setExpenseQuery(e.target.value)}
+                  onChange={(e) => { setExpenseQuery(e.target.value); setExpensePage(1); }}
                   className="w-full pl-8 pr-3 py-1 text-xs rounded border border-slate-200 dark:border-slate-808 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:outline-none"
                 />
               </div>
@@ -2015,7 +2543,7 @@ export default function ProjectDetail({
                 <span className="text-slate-400 shrink-0 select-none"><Filter className="w-3.5 h-3.5 inline" /></span>
                 <select
                   value={expenseCategoryFilter}
-                  onChange={(e) => setExpenseCategoryFilter(e.target.value)}
+                  onChange={(e) => { setExpenseCategoryFilter(e.target.value); setExpensePage(1); }}
                   className="w-full p-1 text-xs rounded border border-slate-200 dark:border-slate-808 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none"
                 >
                   <option value="all">{language === 'en' ? 'All Categories' : language === 'fr' ? 'Toutes Catégories' : 'كل الفئات'}</option>
@@ -2023,6 +2551,9 @@ export default function ProjectDetail({
                   <option value="workers">{t.categories.workers}</option>
                   <option value="equipment">{t.categories.equipment}</option>
                   <option value="transportation">{t.categories.transportation}</option>
+                  <option value="utilities">{t.categories.utilities}</option>
+                  <option value="cleaning">{t.categories.cleaning}</option>
+                  <option value="maintenance">{t.categories.maintenance}</option>
                   <option value="miscellaneous">{t.categories.miscellaneous}</option>
                 </select>
               </div>
@@ -2031,7 +2562,7 @@ export default function ProjectDetail({
               <div className="flex items-center gap-1 text-xs">
                 <select
                   value={expensePaidByFilter}
-                  onChange={(e) => setExpensePaidByFilter(e.target.value)}
+                  onChange={(e) => { setExpensePaidByFilter(e.target.value); setExpensePage(1); }}
                   className="w-full p-1 text-xs rounded border border-slate-200 dark:border-slate-808 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none animate-none"
                 >
                   <option value="all">{language === 'en' ? 'All Payers' : language === 'fr' ? 'Tous Payeurs' : 'كل الدافعين'}</option>
@@ -2057,16 +2588,19 @@ export default function ProjectDetail({
                       <th className="py-2.5 w-10">{language === 'en' ? 'Bon' : language === 'fr' ? 'Bon' : 'وصل'}</th>
                       <th className="py-2.5">{language === 'en' ? 'Category' : language === 'fr' ? 'Catégorie' : 'الفئة'}</th>
                       <th className="py-2.5">{language === 'en' ? 'Sender / Paid By' : language === 'fr' ? 'Payeur' : 'الدافع'}</th>
-                      <th className="py-2.5 text-right">{language === 'en' ? 'Raw Amount' : language === 'fr' ? 'Montant' : 'المبلغ الأولي'}</th>
+                      <th className="py-2.5 text-right">{language === 'en' ? 'Amount / Invoice' : language === 'fr' ? 'Montant / Facture' : 'المبلغ / الفاتورة'}</th>
                       <th className="py-2.5 text-right font-semibold"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
-                    {filteredExpenses.map((exp) => {
+                    {visibleExpenses.map((exp, index) => {
                       const payer = project.members.find(m => m.email === exp.paidBy);
                       return (
-                        <tr
+                        <motion.tr
                           key={exp.id}
+                          initial={{ opacity: 0, x: 24 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ duration: 0.24, delay: index * 0.03, ease: [0.22, 1, 0.36, 1] }}
                           id={`expense-row-${exp.id}`}
                           className={`hover:bg-slate-50/40 dark:hover:bg-slate-850/20 transition-colors ${
                             aiFocusId === `expense-row-${exp.id}` ? 'ai-focus-pulse bg-cyan-50/50 dark:bg-cyan-950/20' : ''
@@ -2102,7 +2636,24 @@ export default function ProjectDetail({
                             <p className="font-medium text-slate-800 dark:text-slate-205">{payer ? payer.name : exp.paidBy}</p>
                           </td>
                           <td className="py-3 text-right font-mono font-bold text-slate-900 dark:text-white">
-                            {exp.amount.toLocaleString()} <span className="text-[10px] text-slate-400">{project.currency}</span>
+                            {(() => {
+                              const invoicePrice = exp.commissionPercent ? exp.amount + (exp.amount * exp.commissionPercent / 100) : exp.amount;
+                              return (
+                                <>
+                                  {exp.commissionPercent ? (
+                                    <span className="text-emerald-600 dark:text-emerald-400">{invoicePrice.toLocaleString()}</span>
+                                  ) : (
+                                    <span>{exp.amount.toLocaleString()}</span>
+                                  )}
+                                  {' '}<span className="text-[10px] text-slate-400">{project.currency}</span>
+                                  {exp.commissionPercent && (
+                                    <div className="text-[9px] text-slate-400 font-normal mt-0.5">
+                                      {exp.amount.toLocaleString()} +{exp.commissionPercent}%
+                                    </div>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </td>
                           <td className="py-3 text-right">
                             <div className="flex items-center justify-end gap-0.5">
@@ -2128,11 +2679,38 @@ export default function ProjectDetail({
                               )}
                             </div>
                           </td>
-                        </tr>
+                        </motion.tr>
                       );
                     })}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {expensePageCount > 1 && (
+              <div className="flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500 dark:border-slate-850 dark:text-slate-400">
+                <span>
+                  {language === 'en' ? 'Page' : language === 'fr' ? 'Page' : 'صفحة'} {activeExpensePage} / {expensePageCount}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setExpensePage((page) => Math.max(1, page - 1))}
+                    disabled={activeExpensePage === 1}
+                    className="p-1.5 rounded-md border border-slate-200 dark:border-slate-800 disabled:opacity-40"
+                    aria-label={language === 'en' ? 'Previous expense page' : language === 'fr' ? 'Page précédente' : 'الصفحة السابقة'}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExpensePage((page) => Math.min(expensePageCount, page + 1))}
+                    disabled={activeExpensePage === expensePageCount}
+                    className="p-1.5 rounded-md border border-slate-200 dark:border-slate-800 disabled:opacity-40"
+                    aria-label={language === 'en' ? 'Next expense page' : language === 'fr' ? 'Page suivante' : 'الصفحة التالية'}
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -2148,8 +2726,13 @@ export default function ProjectDetail({
             
             {/* Action view */}
             <div className="flex justify-between items-center pb-4 border-b border-slate-100 dark:border-slate-850 mb-4">
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-1.5">
+              <h3 className="flex items-center gap-1.5 font-bold text-[0px] text-slate-900 dark:text-white">
                 <CheckSquare className="w-4 h-4 text-sky-505" />
+                <span className="text-sm">
+                  {project.projectType === 'rental'
+                    ? (language === 'fr' ? 'Taches de service appartement' : language === 'ar' ? 'Apartment service tasks' : 'Apartment Service Tasks')
+                    : (language === 'fr' ? 'Suivi des jalons & Taches' : language === 'ar' ? 'Roadmap and tasks' : 'Construction Roadmap & Deliverables')}
+                </span>
                 {language === 'en' ? 'Construction Roadmap & Deliverables' : language === 'fr' ? 'Suivi des jalons & Tâches' : 'المسار الزمني والمهام'}
                 <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono font-bold">
                   {project.tasks.length}
@@ -2190,17 +2773,200 @@ export default function ProjectDetail({
         </FadeIn>
       )}
 
+      {activeTab === 'gallery' && (
+        <FadeIn key="gallery">
+          <div className="space-y-4">
+            <div className="flex flex-col gap-4 border-b border-slate-200 pb-4 dark:border-slate-800 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <h2 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-white">
+                  <ImageIcon className="h-5 w-5 text-sky-500" />
+                  {language === 'en' ? 'Project Gallery' : language === 'fr' ? 'Galerie du projet' : 'معرض المشروع'}
+                </h2>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  {language === 'en'
+                    ? 'Before, progress, and after photos from this construction project.'
+                    : language === 'fr'
+                      ? 'Photos avant, pendant et après de ce projet.'
+                      : 'صور المشروع قبل وأثناء وبعد الأشغال.'}
+                </p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <span className="font-mono text-xs font-semibold text-slate-500 dark:text-slate-400">
+                  {galleryItems.length} {language === 'fr' ? 'photos' : language === 'ar' ? 'صور' : 'photos'}
+                </span>
+                {perm.canUploadTaskMedia && (
+                  <>
+                    <div className="grid grid-cols-3 overflow-hidden rounded-md border border-slate-200 bg-white p-0.5 dark:border-slate-700 dark:bg-slate-950">
+                      {(['before', 'progress', 'after'] as PhotoType[]).map((type) => (
+                        <button
+                          key={type}
+                          type="button"
+                          onClick={() => setGalleryPhotoType(type)}
+                          className={`min-h-8 px-2 text-[10px] font-bold capitalize transition-colors ${
+                            galleryPhotoType === type
+                              ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-950'
+                              : 'text-slate-500 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          {type}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      ref={galleryInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="hidden"
+                      onChange={handleGalleryUpload}
+                    />
+                    <button
+                      type="button"
+                      disabled={galleryUploadBusy}
+                      onClick={() => galleryInputRef.current?.click()}
+                      className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md bg-sky-600 px-3 text-xs font-bold text-white transition-colors hover:bg-sky-700 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {galleryUploadBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                      {language === 'fr' ? 'Ajouter des photos' : language === 'ar' ? 'إضافة صور' : 'Add photos'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {(galleryUploadStatus || isUsingFirestoreMedia()) && (
+              <div className="flex flex-col gap-1 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-200 sm:flex-row sm:items-center sm:justify-between">
+                <span>
+                  {galleryUploadStatus ||
+                    (language === 'fr'
+                      ? 'Les images sont compressées à environ 180 Ko et chargées uniquement lorsque vous les affichez.'
+                      : language === 'ar'
+                        ? 'تُضغط الصور إلى حوالي 180 كيلوبايت ولا يتم تحميلها إلا عند عرضها.'
+                        : 'Images are compressed to about 180 KB and downloaded only when you view them.')}
+                </span>
+                <span className="shrink-0 font-mono font-semibold">
+                  {language === 'fr' ? '10 max. par envoi' : language === 'ar' ? '10 كحد أقصى لكل رفع' : '10 max per upload'}
+                </span>
+              </div>
+            )}
+
+            {galleryItems.length === 0 ? (
+              <div className="flex min-h-56 flex-col items-center justify-center border border-dashed border-slate-300 bg-white px-5 text-center dark:border-slate-700 dark:bg-slate-900">
+                <ImageIcon className="mb-3 h-8 w-8 text-slate-300 dark:text-slate-600" />
+                <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                  {language === 'en' ? 'No project photos yet' : language === 'fr' ? 'Aucune photo' : 'لا توجد صور بعد'}
+                </p>
+                <p className="mt-1 max-w-md text-xs text-slate-500 dark:text-slate-400">
+                  {language === 'en'
+                    ? 'Photos added to task details will appear here automatically.'
+                    : language === 'fr'
+                      ? 'Les photos ajoutées aux tâches apparaîtront ici automatiquement.'
+                      : 'الصور المضافة إلى تفاصيل المهام ستظهر هنا تلقائياً.'}
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {visibleGalleryItems.map((item) => {
+                  const source = item.url || resolvedGalleryUrls[item.id] || '';
+                  return (
+                    <figure
+                      key={item.id}
+                      className="group min-w-0 overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
+                    >
+                      <div className="relative aspect-[4/3] w-full overflow-hidden bg-slate-100 dark:bg-slate-950">
+                        {source ? (
+                          <img
+                            src={source}
+                            alt={item.title}
+                            loading="lazy"
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full items-center justify-center">
+                            <ImageIcon className="h-7 w-7 text-slate-300 dark:text-slate-700" />
+                          </div>
+                        )}
+                        {item.isProjectPhoto && perm.canUploadTaskMedia && (
+                          <button
+                            type="button"
+                            title={language === 'fr' ? 'Supprimer la photo' : language === 'ar' ? 'حذف الصورة' : 'Delete photo'}
+                            aria-label={language === 'fr' ? 'Supprimer la photo' : language === 'ar' ? 'حذف الصورة' : 'Delete photo'}
+                            onClick={() => promptDeleteGalleryPhoto(item.photoId)}
+                            className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-md bg-white/95 text-red-600 opacity-100 shadow-sm transition-colors hover:bg-red-50 dark:bg-slate-950/95 dark:text-red-400 dark:hover:bg-red-950/80 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                      <figcaption className="space-y-1 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-xs font-semibold text-slate-800 dark:text-slate-100">
+                            {item.title}
+                          </span>
+                          <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+                            {item.category}
+                          </span>
+                        </div>
+                        {item.taskTitle && (
+                          <p className="truncate text-[10px] text-slate-500 dark:text-slate-400">
+                            {item.taskTitle}
+                          </p>
+                        )}
+                        <p className="font-mono text-[9px] text-slate-400">
+                          {item.date ? new Date(item.date).toLocaleDateString() : ''}
+                        </p>
+                      </figcaption>
+                    </figure>
+                  );
+                })}
+              </div>
+            )}
+            {galleryItems.length > 0 && galleryPageCount > 1 && (
+              <div className="flex items-center justify-between border-t border-slate-200 pt-3 dark:border-slate-800">
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {language === 'fr' ? 'Page' : language === 'ar' ? 'الصفحة' : 'Page'} {galleryPage} / {galleryPageCount}
+                </span>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    title="Previous page"
+                    aria-label="Previous page"
+                    disabled={galleryPage <= 1}
+                    onClick={() => setGalleryPage((page) => Math.max(1, page - 1))}
+                    className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    title="Next page"
+                    aria-label="Next page"
+                    disabled={galleryPage >= galleryPageCount}
+                    onClick={() => setGalleryPage((page) => Math.min(galleryPageCount, page + 1))}
+                    className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </FadeIn>
+      )}
+
       {/* TAB CONTENT: INVOICES, BONS & RECEIPTS GENERATOR */}
       {activeTab === 'docs' && (
         <FadeIn key="docs">
         <div className="space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-1 no-print">
+          <div className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:flex-row sm:items-center sm:justify-between no-print">
             <div>
-              <h2 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-1.5">
-                <FileText className="w-4 h-4 text-sky-500" />
+              <h2 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+                <span className="flex h-8 w-8 items-center justify-center rounded-md bg-sky-500/10 text-sky-600 dark:text-sky-400">
+                  <FileText className="w-4 h-4" />
+                </span>
                 {language === 'en' ? 'Invoices & Vouchers' : language === 'fr' ? 'Factures & Bons' : 'الفواتير والإيصالات'}
               </h2>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                 {language === 'en'
                   ? 'Configure your document, import expenses, then save as PDF.'
                   : language === 'fr'
@@ -2208,19 +2974,35 @@ export default function ProjectDetail({
                     : 'اضبط المستند، استورد المصاريف، ثم اطبع.'}
               </p>
             </div>
+            <div className="grid w-full grid-cols-3 divide-x divide-slate-200 overflow-hidden rounded-md border border-slate-200 text-center dark:divide-slate-800 dark:border-slate-800 sm:w-auto">
+              <div className="min-w-0 px-2 py-2 sm:min-w-[4.75rem] sm:px-3">
+                <span className="block text-[9px] font-bold uppercase text-slate-400">{language === 'en' ? 'Type' : language === 'fr' ? 'Type' : 'النوع'}</span>
+                <span className="mt-0.5 block text-[11px] font-bold text-slate-800 dark:text-slate-100">
+                  {docType === 'invoice' ? (language === 'en' ? 'Invoice' : language === 'fr' ? 'Facture' : 'فاتورة') : docType === 'voucher' ? (language === 'en' ? 'Voucher' : language === 'fr' ? 'Bon' : 'سند') : (language === 'en' ? 'Receipt' : language === 'fr' ? 'Reçu' : 'إيصال')}
+                </span>
+              </div>
+              <div className="min-w-0 px-2 py-2 sm:min-w-[4.75rem] sm:px-3">
+                <span className="block text-[9px] font-bold uppercase text-slate-400">{language === 'en' ? 'Lines' : language === 'fr' ? 'Lignes' : 'البنود'}</span>
+                <span className="mt-0.5 block text-[11px] font-mono font-bold text-slate-800 dark:text-slate-100">{docItems.length}</span>
+              </div>
+              <div className="min-w-0 px-2 py-2 sm:min-w-[5.5rem] sm:px-3">
+                <span className="block text-[9px] font-bold uppercase text-slate-400">{language === 'en' ? 'Total' : language === 'fr' ? 'Total' : 'الإجمالي'}</span>
+                <span className="mt-0.5 block text-[11px] font-mono font-bold text-sky-600 dark:text-sky-400">{docTotal.toLocaleString()} {project.currency}</span>
+              </div>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-5 gap-4 xl:gap-5">
+          <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(34rem,0.9fr)_minmax(0,1.5fr)]">
             
             {/* Left Column: Creator controls */}
-            <div className="xl:col-span-2 flex flex-col gap-4 min-w-0 no-print">
+            <div className="flex min-w-0 flex-col gap-4 no-print">
 
-              {/* Row 1: Presets + Import expenses side by side */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
+              {/* Setup and expense selection use the full editor width. */}
+              <div className="grid grid-cols-1 gap-4">
               
               {/* Document Presets */}
-              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm flex flex-col min-h-0 min-w-0">
-                <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-850 shrink-0">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm flex flex-col min-h-0 min-w-0">
+                <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-850 shrink-0 bg-slate-50/70 dark:bg-slate-950/30">
                   <h3 className="font-bold text-xs text-slate-900 dark:text-white flex items-center gap-2">
                     <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400">
                       <Sliders className="w-3.5 h-3.5" />
@@ -2229,7 +3011,7 @@ export default function ProjectDetail({
                   </h3>
                 </div>
 
-                <div className="p-4 space-y-3 flex-1 overflow-y-auto max-h-[32rem] md:max-h-[36rem]">
+                <div className="flex-1 space-y-3 p-4">
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1.5">
                       {language === 'en' ? 'Document type' : language === 'fr' ? 'Type de pièce' : 'نوع المستند'}
@@ -2268,6 +3050,41 @@ export default function ProjectDetail({
                       >
                         {language === 'en' ? 'Receipt' : language === 'fr' ? 'Reçu' : 'إيصال'}
                       </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        {language === 'en' ? 'Invoice columns' : language === 'fr' ? 'Colonnes de facture' : 'أعمدة الفاتورة'}
+                      </label>
+                      <span className="text-[9px] text-slate-400">
+                        {language === 'en' ? 'Description is always shown' : language === 'fr' ? 'La description est toujours affichée' : 'الوصف ظاهر دائما'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {([
+                        ['quantity', language === 'en' ? 'Qty' : language === 'fr' ? 'Qté' : 'الكمية'],
+                        ['unitPrice', language === 'en' ? 'Unit price' : language === 'fr' ? 'Prix unitaire' : 'سعر الوحدة'],
+                        ['total', language === 'en' ? 'Total' : language === 'fr' ? 'Total' : 'المجموع'],
+                      ] as [DocumentLineColumn, string][]).map(([column, label]) => (
+                        <label
+                          key={column}
+                          className={`flex cursor-pointer items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-[10px] font-semibold transition-colors ${
+                            docVisibleColumns.includes(column)
+                              ? 'border-sky-500/60 bg-sky-500/10 text-sky-700 dark:text-sky-300'
+                              : 'border-slate-200 bg-white text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={docVisibleColumns.includes(column)}
+                            onChange={() => toggleDocumentColumn(column)}
+                            className="h-3 w-3 accent-sky-500"
+                          />
+                          <span className="truncate">{label}</span>
+                        </label>
+                      ))}
                     </div>
                   </div>
 
@@ -2325,18 +3142,9 @@ export default function ProjectDetail({
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                         Format
                       </label>
-                      <select
-                        value={docPaperFormat}
-                        onChange={(e) => {
-                          const v = e.target.value as 'A4' | 'A5';
-                          setDocPaperFormat(v);
-                          persistCurrentDocPreset({ paperFormat: v });
-                        }}
-                        className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none"
-                      >
-                        <option value="A4">A4</option>
-                        <option value="A5">A5</option>
-                      </select>
+                      <div className="flex h-[30px] items-center rounded-lg border border-slate-200 bg-slate-50 px-2 text-xs font-mono font-semibold text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
+                        A4
+                      </div>
                     </div>
                   </div>
 
@@ -2432,8 +3240,8 @@ export default function ProjectDetail({
               </div>
 
               {/* Import Registered Expenses */}
-              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm flex flex-col min-h-0 min-w-0">
-                <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-850 shrink-0">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm flex flex-col min-h-0 min-w-0">
+                <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-850 shrink-0 bg-slate-50/70 dark:bg-slate-950/30">
                   <h3 className="font-bold text-xs text-slate-900 dark:text-white flex items-center gap-2">
                     <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                       <CreditCard className="w-3.5 h-3.5" />
@@ -2449,7 +3257,7 @@ export default function ProjectDetail({
                   </p>
                 </div>
 
-                <div className="p-3 flex-1 min-h-[10rem] max-h-[32rem] md:max-h-[36rem] overflow-y-auto">
+                <div className="min-h-[10rem] max-h-[34rem] flex-1 overflow-y-auto p-3">
                 {project.expenses.length === 0 ? (
                   <div className="h-full min-h-[8rem] flex items-center justify-center border border-dashed border-slate-200 dark:border-slate-800 rounded-lg text-center text-[11px] text-slate-400 px-3">
                     {language === 'en' ? 'No expenses in this project yet.' : language === 'fr' ? 'Aucun frais dans ce projet.' : 'لا توجد مصاريف في هذا المشروع.'}
@@ -2457,21 +3265,31 @@ export default function ProjectDetail({
                 ) : (
                   <div className="space-y-1.5">
                     {project.expenses.map((exp) => {
-                      const isChecked = docItems.some(item => item.id === exp.id || item.description.includes(exp.title));
+                      const importedItem = docItems.find(item => item.sourceExpenseId === exp.id || item.id === exp.id);
+                      const isChecked = Boolean(importedItem);
                       const payerName = project.members.find(m => m.email === exp.paidBy)?.name || exp.paidBy;
 
                       return (
-                        <button
+                        <div
                           key={exp.id}
-                          type="button"
+                          role="checkbox"
+                          aria-checked={isChecked}
+                          tabIndex={0}
                           onClick={() => handleToggleExpenseIntoDoc(exp)}
-                          className={`w-full text-left p-2 rounded-lg border text-[11px] flex items-center justify-between gap-2 transition-all cursor-pointer ${
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              handleToggleExpenseIntoDoc(exp);
+                            }
+                          }}
+                          className={`w-full text-left p-2 rounded-lg border text-[11px] transition-all cursor-pointer ${
                             isChecked
                               ? 'bg-emerald-500/5 border-emerald-500/60 text-emerald-950 dark:text-emerald-300'
                               : 'bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-850 text-slate-750 dark:text-slate-350 hover:bg-slate-100 dark:hover:bg-slate-850'
                           }`}
                         >
-                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0 flex-1">
                             <div className={`h-3.5 w-3.5 shrink-0 rounded-full border flex items-center justify-center transition-all ${
                               isChecked ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300'
                             }`}>
@@ -2482,11 +3300,44 @@ export default function ProjectDetail({
                               <span className="text-[9px] text-slate-400 font-mono truncate block">{payerName}</span>
                             </div>
                           </div>
-                          
-                          <span className="font-bold font-mono text-slate-900 dark:text-white shrink-0 text-[10px]">
-                            {exp.amount.toLocaleString()}
+
+                          <span className="font-bold font-mono text-slate-900 dark:text-white shrink-0 text-[10px] flex items-center gap-1">
+                            {(() => {
+                              const ip = exp.commissionPercent ? exp.amount + (exp.amount * exp.commissionPercent / 100) : exp.amount;
+                              return (
+                                <>
+                                  <span className={exp.commissionPercent ? 'text-emerald-600 dark:text-emerald-400' : ''}>{ip.toLocaleString()}</span>
+                                  {exp.commissionPercent && <span className="text-[8px] text-slate-400 font-normal">+{exp.commissionPercent}%</span>}
+                                </>
+                              );
+                            })()}
                           </span>
-                        </button>
+                          </div>
+                          {importedItem && (
+                            <label
+                              className="mt-2 flex items-center justify-between gap-2 border-t border-emerald-500/20 pt-2"
+                              onClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => event.stopPropagation()}
+                            >
+                              <span className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                                {language === 'en' ? 'Invoice margin' : language === 'fr' ? 'Marge facture' : 'عمولة الفاتورة'}
+                              </span>
+                              <span className="relative w-20">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={importedItem.commissionPercent || ''}
+                                  placeholder="0"
+                                  aria-label={language === 'en' ? `Invoice margin for ${exp.title}` : language === 'fr' ? `Marge facture pour ${exp.title}` : `عمولة الفاتورة لـ ${exp.title}`}
+                                  onChange={(event) => updateDocumentItemCommission(importedItem.id, Number(event.target.value))}
+                                  className="w-full rounded-md border border-emerald-500/40 bg-white px-2 py-1 pr-4 text-right font-mono text-[11px] text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500 dark:bg-slate-900 dark:text-white"
+                                />
+                                <span className="pointer-events-none absolute right-1.5 top-1 text-[10px] text-slate-400">%</span>
+                              </span>
+                            </label>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -2495,6 +3346,51 @@ export default function ProjectDetail({
               </div>
 
               </div>
+
+              {docItems.some((item) => item.sourceExpenseId) && (
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm px-4 py-3">
+                  <div className="mb-2.5 flex items-center justify-between gap-3">
+                    <h3 className="text-xs font-bold text-slate-900 dark:text-white">
+                      {language === 'en' ? 'Invoice line settings' : language === 'fr' ? 'Réglages des lignes' : 'إعدادات بنود الفاتورة'}
+                    </h3>
+                    <span className="text-[10px] text-slate-400">
+                      {language === 'en' ? 'Invoice only' : language === 'fr' ? 'Facture uniquement' : 'للفاتورة فقط'}
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {docItems.filter((item) => item.sourceExpenseId).map((item) => (
+                      <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_4.5rem] gap-2 rounded-lg border border-slate-100 bg-slate-50/70 p-2 dark:border-slate-850 dark:bg-slate-950/40 sm:grid-cols-[minmax(0,1fr)_4.5rem_5.5rem]">
+                        <input
+                          type="text"
+                          value={item.description}
+                          onChange={(e) => updateDocItem(item.id, { description: e.target.value })}
+                          aria-label={language === 'en' ? 'Invoice line description' : language === 'fr' ? 'Description de ligne' : 'وصف بند الفاتورة'}
+                          className="min-w-0 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-sky-400 dark:border-slate-800 dark:bg-slate-900 dark:text-white sm:col-span-1"
+                        />
+                        <label className="min-w-0">
+                          <span className="mb-0.5 block text-[9px] font-bold uppercase text-slate-400">{language === 'en' ? 'Margin' : language === 'fr' ? 'Marge' : 'العمولة'}</span>
+                          <div className="relative">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.commissionPercent || ''}
+                              placeholder="0"
+                              onChange={(e) => updateDocumentItemCommission(item.id, Number(e.target.value))}
+                              className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 pr-4 text-right font-mono text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-sky-400 dark:border-slate-800 dark:bg-slate-900 dark:text-white"
+                            />
+                            <span className="pointer-events-none absolute right-1.5 top-1.5 text-[10px] text-slate-400">%</span>
+                          </div>
+                        </label>
+                        <div className="col-span-2 flex items-center justify-between border-t border-slate-200 pt-1.5 text-[10px] dark:border-slate-800 sm:col-span-1 sm:block sm:border-t-0 sm:pt-0">
+                          <span className="text-slate-400 sm:block">{language === 'en' ? 'Invoice price' : language === 'fr' ? 'Prix facturé' : 'سعر الفاتورة'}</span>
+                          <span className="font-mono font-bold text-slate-800 dark:text-slate-100">{item.unitPrice.toLocaleString()} {project.currency}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Row 2: Compact manual line item */}
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm px-4 py-3">
@@ -2565,23 +3461,30 @@ export default function ProjectDetail({
             </div>
 
             {/* Right Column: Live document preview */}
-            <div className="xl:col-span-3 space-y-3 min-w-0">
+            <div className="min-w-0 space-y-3 xl:sticky xl:top-4 xl:self-start">
               
-              <div className="no-print flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3 rounded-xl shadow-sm">
-                <div>
-                  <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
-                    <FileText className="w-3.5 h-3.5 text-slate-400" />
+              <div className="no-print flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                    <FileText className="w-4 h-4" />
+                  </span>
+                  <div className="min-w-0">
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
                     {language === 'en' ? 'Live preview' : language === 'fr' ? 'Aperçu en direct' : 'معاينة مباشرة'}
                   </span>
                   <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    {docPaperFormat} · {language === 'en' ? 'export matches paper size' : language === 'fr' ? 'export au format papier' : 'التصدير بحجم الورقة'}
+                    {docNumber || (language === 'en' ? 'Draft document' : language === 'fr' ? 'Brouillon' : 'مسودة')} · {docPaperFormat}
+                  </span>
+                  </div>
+                  <span className="ml-auto shrink-0 rounded-md bg-sky-500/10 px-2 py-1 font-mono text-[10px] font-bold text-sky-700 dark:text-sky-300 sm:ml-2">
+                    {docTotal.toLocaleString()} {project.currency}
                   </span>
                 </div>
                 
                 <button
                   type="button"
                   onClick={handleSaveDocumentAsPdf}
-                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-sky-500 hover:bg-sky-600 text-white shadow-sm cursor-pointer transition-all shrink-0"
+                  className="flex items-center justify-center gap-1.5 rounded-md bg-sky-500 px-3 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-sky-600 cursor-pointer shrink-0"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>{language === 'en' ? 'Save as PDF' : language === 'fr' ? 'Enregistrer en PDF' : 'حفظ كـ PDF'}</span>
@@ -2591,9 +3494,9 @@ export default function ProjectDetail({
               {/* LIVE PAGE CARD — only this block is exported */}
               <div 
                 className={
-                  'bg-white text-slate-900 rounded-xl border border-slate-200 p-8 shadow-md relative min-h-[48rem] flex flex-col justify-between font-sans ' +
-                  'print:min-h-0 print:m-0 print:border-none print:shadow-none print:rounded-none ' +
-                  (docPaperFormat === 'A4' ? 'print-page-a4' : 'print-page-a5')
+                  'bg-white text-slate-900 rounded-xl border border-slate-200 p-4 shadow-md relative min-h-[48rem] flex flex-col justify-between font-sans sm:p-8 ' +
+                  'print:min-h-0 print:m-0 print:border-none print:shadow-none print:rounded-none print:p-8 ' +
+                  'print-page-a4'
                 }
                 id="printable-civil-bill"
               >
@@ -2678,15 +3581,21 @@ export default function ProjectDetail({
                       <thead>
                         <tr className="border-b border-slate-200">
                           <th className="pb-2.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider pl-1">{language === 'en' ? 'Description' : language === 'fr' ? 'Description de la prestation' : 'البيان / وصف الخدمة'}</th>
-                          <th className="pb-2.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-center w-16">{language === 'en' ? 'Qty' : language === 'fr' ? 'Qté' : 'الكمية'}</th>
-                          <th className="pb-2.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-right w-24">{language === 'en' ? 'Unit Price' : language === 'fr' ? 'Prix Unitaire' : 'سعر الوحدة'}</th>
-                          <th className="pb-2.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-right w-28 pr-1">{language === 'en' ? 'Total' : language === 'fr' ? 'Total' : 'المجموع'}</th>
+                          {docVisibleColumns.includes('quantity') && (
+                            <th className="pb-2.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-center w-16">{language === 'en' ? 'Qty' : language === 'fr' ? 'Qté' : 'الكمية'}</th>
+                          )}
+                          {docVisibleColumns.includes('unitPrice') && (
+                            <th className="pb-2.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-right w-24">{language === 'en' ? 'Unit Price' : language === 'fr' ? 'Prix Unitaire' : 'سعر الوحدة'}</th>
+                          )}
+                          {docVisibleColumns.includes('total') && (
+                            <th className="pb-2.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider text-right w-28 pr-1">{language === 'en' ? 'Total' : language === 'fr' ? 'Total' : 'المجموع'}</th>
+                          )}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {docItems.length === 0 ? (
                           <tr>
-                            <td colSpan={4} className="py-8 text-center text-xs text-slate-400 font-sans">
+                            <td colSpan={1 + docVisibleColumns.length} className="py-8 text-center text-xs text-slate-400 font-sans">
                               {language === 'en' ? 'Select project expenditures from side list or add custom line items.' : language === 'fr' ? 'Sélectionnez ou ajoutez des lignes d\'achats.' : 'اختر المصاريف من القائمة الجانبية أو أضف بنوداً يدوية مخصصة.'}
                             </td>
                           </tr>
@@ -2708,11 +3617,17 @@ export default function ProjectDetail({
                                     </button>
                                   </div>
                                 </td>
-                                <td className="py-3 text-center font-mono text-slate-600">{item.quantity}</td>
-                                <td className="py-3 text-right font-mono text-slate-600">{item.unitPrice.toLocaleString()}</td>
-                                <td className="py-3 text-right font-mono font-semibold text-slate-900 pr-1">
-                                  {lineTotal.toLocaleString()} {project.currency}
-                                </td>
+                                {docVisibleColumns.includes('quantity') && (
+                                  <td className="py-3 text-center font-mono text-slate-600">{item.quantity}</td>
+                                )}
+                                {docVisibleColumns.includes('unitPrice') && (
+                                  <td className="py-3 text-right font-mono text-slate-600">{item.unitPrice.toLocaleString()}</td>
+                                )}
+                                {docVisibleColumns.includes('total') && (
+                                  <td className="py-3 text-right font-mono font-semibold text-slate-900 pr-1">
+                                    {lineTotal.toLocaleString()} {project.currency}
+                                  </td>
+                                )}
                               </tr>
                             );
                           })
@@ -2758,7 +3673,7 @@ export default function ProjectDetail({
                       <span className="font-bold text-slate-600 uppercase tracking-widest text-[8.5px] block mb-1">
                         {language === 'en' ? 'NOTES & BANK INSTRUCTIONS' : language === 'fr' ? 'CONDITIONS & RELEVÉ' : 'ملاحظات وتوجيهات مصرفية / شروط الدفع'}
                       </span>
-                      <p className="italic">{docNotes}</p>
+                      <p className="whitespace-pre-line italic">{docNotes}</p>
                     </div>
 
                     <div className="text-right flex flex-col justify-end items-end h-full">
@@ -2794,6 +3709,16 @@ export default function ProjectDetail({
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                     {t.rental.ownerName}: {project.rentalProperty.ownerName}
                   </p>
+                  {(project.rentalProperty.ownerPhone || project.rentalProperty.ownerEmail) && (
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
+                      {[project.rentalProperty.ownerPhone, project.rentalProperty.ownerEmail].filter(Boolean).join(' · ')}
+                    </p>
+                  )}
+                  {project.rentalProperty.notes && (
+                    <p className="mt-2 max-w-2xl text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                      {project.rentalProperty.notes}
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-4 text-xs">
                   <div className="text-right">
@@ -2811,33 +3736,64 @@ export default function ProjectDetail({
 
           {/* Revenue Summary */}
           {project.rentalBookings && project.rentalBookings.length > 0 && (
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
               <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
                 <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.totalRevenue}</p>
                 <p className="text-lg font-bold text-slate-900 dark:text-white mt-1">
-                  {project.rentalBookings.reduce((s, b) => s + b.totalAmount, 0)} {project.currency}
+                  {rentalRevenue} {project.currency}
                 </p>
               </div>
               <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
                 <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.totalCommission}</p>
                 <p className="text-lg font-bold text-emerald-600 dark:text-emerald-400 mt-1">
-                  +{project.rentalBookings.reduce((s, b) => s + b.commission, 0)} {project.currency}
+                  +{rentalCommission} {project.currency}
                 </p>
               </div>
               <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
                 <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.totalPayout}</p>
                 <p className="text-lg font-bold text-slate-900 dark:text-white mt-1">
-                  {project.rentalBookings.reduce((s, b) => s + b.ownerPayout, 0)} {project.currency}
+                  {rentalOwnerPayout} {project.currency}
                 </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{language === 'en' ? 'Apartment Expenses' : language === 'fr' ? 'Dépenses appart' : 'مصاريف الشقة'}</p>
+                <p className="text-lg font-bold text-rose-600 dark:text-rose-400 mt-1">
+                  -{totalSpent} {project.currency}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{language === 'en' ? 'Net Owner Balance' : language === 'fr' ? 'Solde net propriétaire' : 'صافي المالك'}</p>
+                <p className={`text-lg font-bold mt-1 ${rentalNetOwner >= 0 ? 'text-slate-900 dark:text-white' : 'text-rose-600 dark:text-rose-400'}`}>
+                  {rentalNetOwner} {project.currency}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.balanceDue}</p>
+                <p className="text-lg font-bold text-amber-600 dark:text-amber-400 mt-1">
+                  {rentalBalanceDue} {project.currency}
+                </p>
+                <p className="mt-1 text-[10px] text-slate-400">{t.rental.paidAmount}: {rentalPaid}</p>
               </div>
             </div>
           )}
 
           {/* Add Booking Form */}
-          <RentalBookingForm
+          {perm.canModifySettings && (
+            <RentalBookingForm
+              project={project}
+              language={language}
+              t={t}
+              onSave={async (updatedProject) => {
+                setProject(updatedProject);
+                if (user) await saveProjectToDB(user.uid, updatedProject);
+              }}
+            />
+          )}
+
+          <RentalOwnerStatement
             project={project}
             language={language}
-            t={t}
+            canManage={perm.canModifySettings}
             onSave={async (updatedProject) => {
               setProject(updatedProject);
               if (user) await saveProjectToDB(user.uid, updatedProject);
@@ -2849,6 +3805,11 @@ export default function ProjectDetail({
             project={project}
             language={language}
             t={t}
+            canManage={perm.canModifySettings}
+            onPrepareReceipt={(booking, payment) => {
+              applyDocumentDraftFromAI(buildRentalPaymentReceiptDraft(project, booking, payment));
+            }}
+            onRequestConfirm={requestConfirm}
             onUpdate={async (updatedProject) => {
               setProject(updatedProject);
               if (user) await saveProjectToDB(user.uid, updatedProject);
@@ -2864,7 +3825,7 @@ export default function ProjectDetail({
       {/* MODAL DIALOG: ADD / EDIT EXPENSE */}
       {showAddExpense && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs px-4"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-3 py-4 backdrop-blur-xs sm:items-center sm:px-4"
           id="add-expense-modal"
           onClick={closeAddExpenseModal}
           role="presentation"
@@ -2926,6 +3887,27 @@ export default function ProjectDetail({
                   />
                 </div>
                 <div>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Commission %' : language === 'fr' ? 'Commission %' : 'نسبة العمولة'}</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step="any"
+                      value={expenseCommission}
+                      onChange={(e) => setExpenseCommission(Number(e.target.value))}
+                      className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none font-mono font-semibold"
+                    />
+                    {expenseCommission > 0 && expenseAmount > 0 && (
+                      <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 whitespace-nowrap shrink-0">
+                        +{(expenseAmount * expenseCommission / 100).toLocaleString()} {project.currency}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Date' : language === 'fr' ? 'Date' : 'التاريخ'}</label>
                   <input
                     type="date"
@@ -2948,9 +3930,54 @@ export default function ProjectDetail({
                   <option value="workers">{t.categories.workers}</option>
                   <option value="equipment">{t.categories.equipment}</option>
                   <option value="transportation">{t.categories.transportation}</option>
+                  <option value="utilities">{t.categories.utilities}</option>
+                  <option value="cleaning">{t.categories.cleaning}</option>
+                  <option value="maintenance">{t.categories.maintenance}</option>
                   <option value="miscellaneous">{t.categories.miscellaneous}</option>
                 </select>
               </div>
+
+              {project.projectType === 'rental' && (
+                <div className="rounded-lg border border-teal-200 bg-teal-50/60 p-3 dark:border-teal-900/60 dark:bg-teal-950/20">
+                  <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-teal-700 dark:text-teal-300">
+                    {rentalText(language, 'Owner report treatment', 'Traitement dans le rapport propriétaire')}
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label>
+                      <span className="mb-1 block text-[10px] font-bold uppercase text-slate-500">
+                        {rentalText(language, 'Charged to', 'À la charge de')}
+                      </span>
+                      <select
+                        value={expenseRentalChargeTo}
+                        onChange={(event) => setExpenseRentalChargeTo(event.target.value as NonNullable<Expense['rentalChargeTo']>)}
+                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
+                      >
+                        <option value="owner">{rentalText(language, 'Property owner', 'Propriétaire')}</option>
+                        <option value="rent">{rentalText(language, 'Deduct from rent', 'Déduire du loyer')}</option>
+                        <option value="management">{rentalText(language, 'Management company', 'Notre société')}</option>
+                        <option value="guest">{rentalText(language, 'Guest', 'Client / voyageur')}</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span className="mb-1 block text-[10px] font-bold uppercase text-slate-500">
+                        {rentalText(language, 'Related booking', 'Séjour lié')}
+                      </span>
+                      <select
+                        value={expenseRentalBookingId}
+                        onChange={(event) => setExpenseRentalBookingId(event.target.value)}
+                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
+                      >
+                        <option value="">{rentalText(language, 'No specific booking', 'Aucun séjour précis')}</option>
+                        {(project.rentalBookings || []).map((booking) => (
+                          <option key={booking.id} value={booking.id}>
+                            {booking.clientName} · {booking.checkIn}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -3011,7 +4038,24 @@ export default function ProjectDetail({
                       <button
                         type="button"
                         disabled={expenseSaving}
-                        onClick={() => setRemoveExpenseReceipt(true)}
+                        onClick={() => requestConfirm({
+                          title: language === 'en'
+                            ? 'Remove receipt?'
+                            : language === 'fr'
+                              ? 'Supprimer le reçu ?'
+                              : 'حذف الوصل؟',
+                          message: language === 'en'
+                            ? 'Remove this supplier receipt from the expense when the changes are saved?'
+                            : language === 'fr'
+                              ? 'Supprimer ce reçu fournisseur de la dépense lors de l’enregistrement ?'
+                              : 'حذف وصل المورد من المصروف عند حفظ التغييرات؟',
+                          confirmLabel: language === 'en'
+                            ? 'Remove receipt'
+                            : language === 'fr'
+                              ? 'Supprimer le reçu'
+                              : 'حذف الوصل',
+                          onConfirm: () => setRemoveExpenseReceipt(true),
+                        })}
                         className="text-[10px] font-semibold text-red-600 hover:underline disabled:opacity-50 dark:text-red-400"
                       >
                         {language === 'en' ? 'Remove' : language === 'fr' ? 'Supprimer' : 'حذف'}
@@ -3047,6 +4091,7 @@ export default function ProjectDetail({
                 language={language}
                 value={expenseReceiptDraft}
                 onChange={setExpenseReceiptDraft}
+                onRequestConfirm={requestConfirm}
                 disabled={expenseSaving}
               />
 
@@ -3091,12 +4136,12 @@ export default function ProjectDetail({
       {/* MODAL: EDIT REIMBURSEMENT */}
       {showReimbursementModal && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs px-4"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-3 py-4 backdrop-blur-xs sm:items-center sm:px-4"
           onClick={closeReimbursementModal}
           role="presentation"
         >
           <div
-            className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl p-5 text-left font-sans"
+            className="max-h-[calc(100dvh-2rem)] w-full max-w-sm overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 text-left font-sans shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:p-5"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -3141,7 +4186,7 @@ export default function ProjectDetail({
                   ))}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">
                     {language === 'en' ? 'Amount' : language === 'fr' ? 'Montant' : 'المبلغ'}
@@ -3187,13 +4232,13 @@ export default function ProjectDetail({
       {/* MODAL DIALOG: SCHEDULE ROADMAP TASK */}
       {showAddTask && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs px-4"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-3 py-4 backdrop-blur-xs sm:items-center sm:px-4"
           id="add-task-modal"
           onClick={() => setShowAddTask(false)}
           role="presentation"
         >
           <div
-            className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl p-5 text-left font-sans"
+            className="max-h-[calc(100dvh-2rem)] w-full max-w-sm overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 text-left font-sans shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:p-5"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -3295,13 +4340,13 @@ export default function ProjectDetail({
       {/* SETUP DIALOG / PROJECT OPTIONS EDIT DRAWER */}
       {showSettings && perm.canModifySettings && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-xs px-4"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-4 py-6 backdrop-blur-xs sm:items-center"
           id="project-settings-modal"
           onClick={() => setShowSettings(false)}
           role="presentation"
         >
           <div
-            className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 rounded-xl shadow-2xl p-5 text-left font-sans"
+            className="flex max-h-[calc(100dvh-3rem)] w-full max-w-md flex-col rounded-xl border border-slate-200 bg-white p-4 text-left font-sans shadow-2xl dark:border-slate-805 dark:bg-slate-900 sm:p-5"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -3319,7 +4364,7 @@ export default function ProjectDetail({
               </button>
             </div>
 
-            <form onSubmit={handleSaveSettings} className="space-y-4 mt-4">
+            <form onSubmit={handleSaveSettings} className="mt-4 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
               <div>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{language === 'en' ? 'Project Name' : language === 'fr' ? 'Nom du chantier' : 'اسم المشروع / الورشة'}</label>
                 <input
@@ -3366,7 +4411,6 @@ export default function ProjectDetail({
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 font-semibold"
                   >
                     <option value="construction">{t.projectTypes.construction}</option>
-                    <option value="service">{t.projectTypes.service}</option>
                     <option value="rental">{t.projectTypes.rental}</option>
                   </select>
                 </div>
@@ -3385,6 +4429,41 @@ export default function ProjectDetail({
                   </select>
                 </div>
               </div>
+
+              {editProjectType === 'rental' && (
+                <div className="rounded-xl border border-purple-100 bg-purple-50/40 p-3 dark:border-purple-900/40 dark:bg-purple-950/20">
+                  <p className="mb-3 text-[10px] font-bold uppercase tracking-wider text-purple-700 dark:text-purple-300">
+                    {language === 'en' ? 'Rental controls' : language === 'fr' ? 'Contrôles location' : 'إعدادات الإيجار'}
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{t.rental.ownerName}</label>
+                      <input type="text" value={editRentalOwnerName} onChange={(e) => setEditRentalOwnerName(e.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{t.rental.buildingNumber}</label>
+                      <input type="text" value={editRentalBuildingNumber} onChange={(e) => setEditRentalBuildingNumber(e.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{language === 'en' ? 'Owner Phone' : language === 'fr' ? 'Tél propriétaire' : 'هاتف المالك'}</label>
+                      <input type="tel" value={editRentalOwnerPhone} onChange={(e) => setEditRentalOwnerPhone(e.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{language === 'en' ? 'Owner Email' : language === 'fr' ? 'Email propriétaire' : 'بريد المالك'}</label>
+                      <input type="email" value={editRentalOwnerEmail} onChange={(e) => setEditRentalOwnerEmail(e.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{t.rental.pricePerNight}</label>
+                      <input type="number" min={0} value={editRentalPricePerNight} onChange={(e) => setEditRentalPricePerNight(Number(e.target.value))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-mono text-slate-900 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{t.rental.commissionRate}</label>
+                      <input type="number" min={0} max={100} value={editRentalCommissionRate} onChange={(e) => setEditRentalCommissionRate(Number(e.target.value))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-mono text-slate-900 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white" />
+                    </div>
+                  </div>
+                  <textarea rows={2} value={editRentalNotes} onChange={(e) => setEditRentalNotes(e.target.value)} placeholder={language === 'en' ? 'Owner instructions, check-in rules, keys, cleaning notes...' : language === 'fr' ? 'Instructions propriétaire, clés, ménage...' : 'تعليمات المالك، المفاتيح، التنظيف...'} className="mt-3 w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:outline-none dark:border-slate-800 dark:bg-slate-950 dark:text-white" />
+                </div>
+              )}
 
               <div>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
@@ -3508,6 +4587,119 @@ export default function ProjectDetail({
 }
 
 /* ─── Rental Booking Form ─── */
+function RentalOwnerStatement({ project, language, canManage, onSave }: { project: Project; language: Language; canManage: boolean; onSave: (project: Project) => Promise<void>; }) {
+  const property = project.rentalProperty;
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const [selectedMonth, setSelectedMonth] = useState(currentMonth);
+  const [commissionRate, setCommissionRate] = useState(property?.monthlyCommissionRates?.[currentMonth] ?? property?.commissionRate ?? 0);
+  const [saving, setSaving] = useState(false);
+  const [paymentAmount, setPaymentAmount] = useState(0);
+  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().slice(0, 10));
+  const [paymentMethod, setPaymentMethod] = useState<NonNullable<RentalOwnerPayment['method']>>('bank_transfer');
+  const [paymentNotes, setPaymentNotes] = useState('');
+
+  useEffect(() => {
+    setCommissionRate(property?.monthlyCommissionRates?.[selectedMonth] ?? property?.commissionRate ?? 0);
+  }, [property?.commissionRate, property?.monthlyCommissionRates, selectedMonth]);
+
+  if (!property) return null;
+  const [year, month] = selectedMonth.split('-').map(Number);
+  const end = Date.UTC(year, month, 1);
+  const monthStart = `${selectedMonth}-01`;
+  const monthEnd = new Date(end).toISOString().slice(0, 10);
+  const stays = (project.rentalBookings || [])
+    .filter((booking) => booking.status !== 'cancelled' && booking.checkIn < monthEnd && booking.checkOut > monthStart)
+    .map((booking) => ({ booking, ...bookingMonthSlice(booking, project, monthStart, monthEnd) }))
+    .filter((stay) => stay.nights > 0);
+  const expenses = project.expenses.filter((expense) => expense.date.slice(0, 7) === selectedMonth);
+  const ownerExpenses = expenses.filter(isOwnerExpense);
+  const ownerPayments = (project.rentalOwnerPayments || []).filter((payment) => (payment.period || payment.date).slice(0, 7) === selectedMonth);
+  const gross = stays.reduce((sum, stay) => sum + stay.amount, 0);
+  const nights = stays.reduce((sum, stay) => sum + stay.nights, 0);
+  const expenseTotal = ownerExpenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const commission = stays.reduce((sum, stay) => sum + stay.commission, 0);
+  const cleaningTotal = stays.reduce((sum, stay) => sum + stay.cleaning, 0);
+  const ownerPaid = ownerPayments.reduce((sum, payment) => sum + payment.amount, 0);
+  const ownerPayout = gross - commission - cleaningTotal - expenseTotal;
+  const remainingPayout = ownerPayout - ownerPaid;
+  const monthLabel = new Intl.DateTimeFormat(
+    language === 'fr' ? 'fr-FR' : language === 'ar' ? 'ar-MA' : 'en-US',
+    { month: 'long', year: 'numeric' }
+  ).format(new Date(`${selectedMonth}-01T12:00:00`));
+
+  const saveRate = async () => {
+    if (!canManage) return;
+    setSaving(true);
+    const finalRate = Math.max(0, commissionRate);
+    const affectedBookingIds = new Set(stays.map(({ booking }) => booking.id));
+    await onSave({
+      ...project,
+      rentalProperty: {
+        ...property,
+        monthlyCommissionRates: { ...(property.monthlyCommissionRates || {}), [selectedMonth]: finalRate },
+      },
+      rentalBookings: (project.rentalBookings || []).map((booking) => {
+        if (!affectedBookingIds.has(booking.id)) return booking;
+        if (booking.commissionRate !== undefined) return booking;
+        const bookingCommission = Math.round(booking.totalAmount * finalRate) / 100;
+        const cleaning = booking.cleaningChargeTo === 'owner' ? booking.cleaningFee || 0 : 0;
+        return { ...booking, commission: bookingCommission, ownerPayout: booking.totalAmount - bookingCommission - cleaning };
+      }),
+    });
+    setSaving(false);
+  };
+
+  const addOwnerPayment = async () => {
+    if (!canManage || paymentAmount <= 0 || !paymentDate) return;
+    setSaving(true);
+    await onSave({
+      ...project,
+      rentalOwnerPayments: [...(project.rentalOwnerPayments || []), {
+        id: `owner_payment_${Date.now()}`,
+        date: paymentDate,
+        amount: Math.max(0, paymentAmount),
+        method: paymentMethod,
+        notes: paymentNotes.trim() || undefined,
+        period: selectedMonth,
+      }],
+    });
+    setPaymentAmount(0);
+    setPaymentNotes('');
+    setSaving(false);
+  };
+
+  return <section className="rounded-lg border border-purple-200 bg-white shadow-sm dark:border-purple-900/60 dark:bg-slate-900">
+    <div className="flex max-w-full flex-col gap-3 overflow-x-auto border-b border-purple-100 bg-purple-50/60 px-4 py-3 dark:border-purple-900/50 dark:bg-purple-950/20 sm:flex-row sm:items-center sm:justify-between">
+      <div><h3 className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white"><DollarSign className="h-4 w-4 text-purple-600" />{rentalText(language, 'Monthly owner statement', 'Relevé mensuel propriétaire')}</h3><p className="mt-0.5 text-[11px] text-slate-500">{property.ownerName} · {monthLabel}</p></div>
+      <div className="flex items-end gap-2"><label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-400">{rentalText(language, 'Month', 'Mois')}</span><DatePickerInput type="month" value={selectedMonth} onChange={setSelectedMonth} ariaLabel={rentalText(language, 'Month', 'Mois')} className="w-40" /></label><label className="w-24"><span className="mb-1 block text-[9px] font-bold uppercase text-slate-400">{rentalText(language, 'Default rate', 'Commission défaut')}</span><div className="relative"><input type="number" min="0" step="0.01" disabled={!canManage} value={commissionRate} onChange={(event) => setCommissionRate(Math.max(0, Number(event.target.value) || 0))} className="h-9 w-full rounded-md border border-purple-300 bg-white px-2 pr-5 text-right font-mono text-xs font-bold disabled:opacity-60 dark:border-purple-800 dark:bg-slate-950" /><span className="pointer-events-none absolute right-2 top-2 text-xs text-slate-400">%</span></div></label>{canManage && <button type="button" onClick={saveRate} disabled={saving} className="h-9 rounded-md bg-purple-600 px-3 text-xs font-bold text-white hover:bg-purple-700 disabled:opacity-60">{saving ? '...' : (rentalText(language, 'Save rate', 'Enregistrer'))}</button>}</div>
+    </div>
+    <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200 dark:border-slate-800 dark:bg-slate-800 sm:grid-cols-3 xl:grid-cols-6">
+      <StatementMetric label={rentalText(language, 'Nights', 'Nuits')} value={String(nights)} />
+      <StatementMetric label={rentalText(language, 'Gross revenue', 'Revenus bruts')} value={`${gross.toLocaleString()} ${project.currency}`} />
+      <StatementMetric label={rentalText(language, 'Our commission', 'Notre commission')} value={`${commission.toLocaleString()} ${project.currency}`} accent="text-emerald-600 dark:text-emerald-400" />
+      <StatementMetric label={rentalText(language, 'Owner cleaning', 'Ménage propriétaire')} value={`${cleaningTotal.toLocaleString()} ${project.currency}`} />
+      <StatementMetric label={rentalText(language, 'Already paid', 'Déjà versé')} value={`${ownerPaid.toLocaleString()} ${project.currency}`} />
+      <StatementMetric label={rentalText(language, 'Remaining payout', 'Reste à verser')} value={`${remainingPayout.toLocaleString()} ${project.currency}`} accent="text-purple-700 dark:text-purple-300" />
+    </div>
+    <div className="grid gap-5 p-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(17rem,0.8fr)]"><div className="min-w-0"><h4 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">{rentalText(language, 'Client stays', 'Séjours clients')}</h4><div className="overflow-x-auto rounded-md border border-slate-200 dark:border-slate-800"><table className="w-full min-w-[30rem] text-left text-xs"><thead className="bg-slate-50 text-[9px] font-bold uppercase text-slate-400 dark:bg-slate-950"><tr><th className="px-3 py-2">{rentalText(language, 'Client', 'Client')}</th><th className="px-3 py-2">{rentalText(language, 'Stay', 'Séjour')}</th><th className="px-3 py-2 text-right">{rentalText(language, 'Nights', 'Nuits')}</th><th className="px-3 py-2 text-right">{rentalText(language, 'Commission', 'Commission')}</th><th className="px-3 py-2 text-right">{rentalText(language, 'Amount', 'Montant')}</th></tr></thead><tbody className="divide-y divide-slate-100 dark:divide-slate-800">{stays.length === 0 ? <tr><td colSpan={5} className="px-3 py-7 text-center text-slate-400">{rentalText(language, 'No stays for this month.', 'Aucun séjour pour ce mois.')}</td></tr> : stays.map(({ booking, nights: stayNights, amount, commission: stayCommission, commissionRate: stayRate, cleaning }) => <tr key={booking.id}><td className="px-3 py-2.5 font-semibold text-slate-800 dark:text-slate-200">{booking.clientName}<span className="mt-0.5 block text-[10px] font-normal text-slate-400">{booking.source || rentalText(language, 'Direct', 'Direct')}{cleaning > 0 ? ` · ${rentalText(language, 'cleaning', 'ménage')} ${cleaning}` : ''}</span></td><td className="px-3 py-2.5 font-mono text-[10px] text-slate-500">{booking.checkIn} - {booking.checkOut}</td><td className="px-3 py-2.5 text-right font-mono">{stayNights}</td><td className="px-3 py-2.5 text-right font-mono">{stayRate}% · {stayCommission.toLocaleString()}</td><td className="px-3 py-2.5 text-right font-mono font-bold">{amount.toLocaleString()} {project.currency}</td></tr>)}</tbody></table></div></div><div><h4 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">{rentalText(language, 'Apartment expenses', 'Dépenses appartement')}</h4><div className="space-y-1.5">{expenses.length === 0 ? <div className="rounded-md border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400 dark:border-slate-800">{rentalText(language, 'No expenses this month.', 'Aucune dépense ce mois.')}</div> : expenses.map((expense) => <div key={expense.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-950/50"><div className="min-w-0"><p className="truncate font-semibold">{expense.title}</p><p className="mt-0.5 text-[10px] text-slate-400">{expense.date} · {expense.rentalChargeTo || 'owner'}{expense.supplier ? ` · ${expense.supplier}` : ''}</p></div><span className={`shrink-0 font-mono font-bold ${isOwnerExpense(expense) ? 'text-rose-600' : 'text-slate-500'}`}>{isOwnerExpense(expense) ? '-' : ''}{expense.amount.toLocaleString()} {project.currency}</span></div>)}<div className="flex justify-between border-t border-slate-200 pt-2 text-xs font-bold dark:border-slate-800"><span>{rentalText(language, 'Owner deductions', 'Déduction propriétaire')}</span><span className="font-mono text-rose-600">-{expenseTotal.toLocaleString()} {project.currency}</span></div></div></div></div>
+    <div className="border-t border-slate-200 p-4 dark:border-slate-800">
+      <div className="mb-2 flex items-center justify-between"><h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{rentalText(language, 'Owner payments', 'Versements au propriétaire')}</h4><span className="font-mono text-xs font-bold text-purple-700 dark:text-purple-300">{ownerPaid.toLocaleString()} {project.currency}</span></div>
+      {canManage && <div className="grid gap-2 sm:grid-cols-[8rem_8rem_10rem_minmax(0,1fr)_auto]">
+        <DatePickerInput value={paymentDate} onChange={setPaymentDate} ariaLabel={rentalText(language, 'Payment date', 'Date du paiement')} />
+        <input type="number" min={0} step="any" value={paymentAmount || ''} onChange={(event) => setPaymentAmount(Math.max(0, Number(event.target.value) || 0))} placeholder={rentalText(language, 'Amount', 'Montant')} className="h-9 rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" />
+        <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as NonNullable<RentalOwnerPayment['method']>)} className="h-9 rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950"><option value="bank_transfer">{rentalText(language, 'Bank transfer', 'Virement')}</option><option value="cash">{rentalText(language, 'Cash', 'Espèces')}</option><option value="offset">{rentalText(language, 'Offset', 'Compensation')}</option><option value="other">{rentalText(language, 'Other', 'Autre')}</option></select>
+        <input value={paymentNotes} onChange={(event) => setPaymentNotes(event.target.value)} placeholder={rentalText(language, 'Reference or note', 'Référence ou note')} className="h-9 min-w-0 rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950" />
+        <button type="button" onClick={addOwnerPayment} disabled={saving || paymentAmount <= 0} className="h-9 rounded-md bg-slate-900 px-3 text-xs font-bold text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-950">{rentalText(language, 'Record payment', 'Enregistrer')}</button>
+      </div>}
+      {ownerPayments.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{ownerPayments.map((payment) => <span key={payment.id} className="rounded-md bg-slate-100 px-2 py-1 font-mono text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{payment.date} · {payment.amount.toLocaleString()} · {payment.method}</span>)}</div>}
+    </div>
+  </section>;
+}
+
+function StatementMetric({ label, value, accent = 'text-slate-900 dark:text-white' }: { label: string; value: string; accent?: string }) {
+  return <div className="bg-white px-3 py-2.5 dark:bg-slate-900"><span className="block text-[9px] font-bold uppercase text-slate-400">{label}</span><span className={`mt-1 block font-mono text-sm font-bold ${accent}`}>{value}</span></div>;
+}
+
 function RentalBookingForm({ project, language, t, onSave }: {
   project: Project;
   language: Language;
@@ -3520,22 +4712,52 @@ function RentalBookingForm({ project, language, t, onSave }: {
   const [checkIn, setCheckIn] = useState('');
   const [checkOut, setCheckOut] = useState('');
   const [numGuests, setNumGuests] = useState(1);
+  const [paidAmount, setPaidAmount] = useState(0);
+  const [bookingSource, setBookingSource] = useState('');
+  const [bookingNotes, setBookingNotes] = useState('');
+  const [nightlyRate, setNightlyRate] = useState(project.rentalProperty?.pricePerNight || 0);
+  const [commissionRate, setCommissionRate] = useState('');
+  const [cleaningFee, setCleaningFee] = useState(0);
+  const [cleaningChargeTo, setCleaningChargeTo] = useState<NonNullable<RentalBooking['cleaningChargeTo']>>('owner');
+  const [bookingError, setBookingError] = useState('');
 
   if (!project.rentalProperty) return null;
 
   const ppn = project.rentalProperty.pricePerNight;
-  const rate = project.rentalProperty.commissionRate;
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!guestName.trim() || !checkIn || !checkOut) return;
-    const ci = new Date(checkIn);
-    const co = new Date(checkOut);
-    const nights = Math.max(1, Math.round((co.getTime() - ci.getTime()) / (1000 * 60 * 60 * 24)));
-    const total = nights * ppn;
-    const commission = Math.round(total * rate / 100);
-    const payout = total - commission;
-
+    if (checkOut <= checkIn) {
+      setBookingError(
+        language === 'fr'
+          ? 'La date de départ doit être après la date d’arrivée.'
+          : language === 'ar'
+            ? 'يجب أن يكون تاريخ الخروج بعد تاريخ الدخول.'
+            : 'Check-out must be after check-in.'
+      );
+      return;
+    }
+    setBookingError('');
+    const nights = rentalDaysBetween(checkIn, checkOut);
+    const finalNightlyRate = Math.max(0, nightlyRate);
+    const total = nights * finalNightlyRate;
+    const bookingCommissionRate = commissionRate === '' ? undefined : Math.max(0, Number(commissionRate) || 0);
+    const commission = bookingCommissionRate === undefined ? 0 : Math.round(total * bookingCommissionRate) / 100;
+    const ownerCleaning = cleaningChargeTo === 'owner' ? Math.max(0, cleaningFee) : 0;
+    const status = rentalBookingStatusForDates(checkIn, checkOut);
+    const initialPaidAmount = Math.min(total, Math.max(0, paidAmount));
+    const initialPayment: RentalBookingPayment | null = initialPaidAmount > 0
+      ? {
+          id: `payment_${Date.now()}`,
+          date: new Date().toISOString().split('T')[0],
+          amount: initialPaidAmount,
+          method: 'other',
+          notes: rentalText(language, 'Initial payment', 'Paiement initial'),
+          receiptNumber: generateDocNumber(DEFAULT_DOC_PRESETS.receipt.prefix),
+          recordedAt: new Date().toISOString(),
+        }
+      : null;
     const booking: RentalBooking = {
       id: `book_${Date.now()}`,
       clientName: guestName,
@@ -3545,11 +4767,21 @@ function RentalBookingForm({ project, language, t, onSave }: {
       checkOut,
       totalNights: nights,
       totalAmount: total,
+      nightlyRate: finalNightlyRate,
+      ...(bookingCommissionRate === undefined ? {} : { commissionRate: bookingCommissionRate }),
       commission,
-      ownerPayout: payout,
-      status: 'upcoming',
-      paidAmount: 0,
-      balanceDue: total,
+      cleaningFee: Math.max(0, cleaningFee),
+      cleaningChargeTo,
+      ownerPayout: total - commission - ownerCleaning,
+      status,
+      source: bookingSource,
+      notes: bookingNotes,
+      paidAmount: initialPaidAmount,
+      balanceDue: Math.max(0, total - initialPaidAmount),
+      paymentOpeningBalance: 0,
+      payments: initialPayment ? [initialPayment] : [],
+      historicalEntry: status === 'completed',
+      recordedAt: new Date().toISOString(),
     };
 
     const updated: Project = {
@@ -3562,6 +4794,14 @@ function RentalBookingForm({ project, language, t, onSave }: {
     setCheckIn('');
     setCheckOut('');
     setNumGuests(1);
+    setPaidAmount(0);
+    setBookingSource('');
+    setBookingNotes('');
+    setNightlyRate(ppn);
+    setCommissionRate('');
+    setCleaningFee(0);
+    setCleaningChargeTo('owner');
+    setBookingError('');
     setShowForm(false);
   };
 
@@ -3579,9 +4819,10 @@ function RentalBookingForm({ project, language, t, onSave }: {
     );
   }
 
-  const nights = checkIn && checkOut ? Math.max(1, Math.round((new Date(checkOut).getTime() - new Date(checkIn).getTime()) / (1000 * 60 * 60 * 24))) : 0;
-  const previewTotal = nights * ppn;
-  const previewCommission = Math.round(previewTotal * rate / 100);
+  const dateRangeValid = Boolean(checkIn && checkOut && checkOut > checkIn);
+  const nights = dateRangeValid ? rentalDaysBetween(checkIn, checkOut) : 0;
+  const previewTotal = nights * Math.max(0, nightlyRate);
+  const previewStatus = dateRangeValid ? rentalBookingStatusForDates(checkIn, checkOut) : null;
 
   return (
     <form onSubmit={handleAdd} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-3">
@@ -3602,22 +4843,69 @@ function RentalBookingForm({ project, language, t, onSave }: {
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.checkIn}</label>
-          <input required type="date" value={checkIn} onChange={e => setCheckIn(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono" />
+          <DatePickerInput required value={checkIn} onChange={(value) => { setCheckIn(value); setBookingError(''); }} ariaLabel={t.rental.checkIn} />
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.checkOut}</label>
-          <input required type="date" value={checkOut} onChange={e => setCheckOut(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono" />
+          <DatePickerInput required min={checkIn || undefined} value={checkOut} onChange={(value) => { setCheckOut(value); setBookingError(''); }} ariaLabel={t.rental.checkOut} />
         </div>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.numberOfGuests}</label>
           <input type="number" min={1} value={numGuests} onChange={e => setNumGuests(Math.max(1, Number(e.target.value)))} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
         </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.paidAmount}</label>
+          <input type="number" min={0} value={paidAmount || ''} onChange={e => setPaidAmount(Number(e.target.value))} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono" />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{rentalText(language, 'Nightly rate', 'Prix par nuit')}</label>
+          <input type="number" min={0} step="any" value={nightlyRate || ''} onChange={e => setNightlyRate(Math.max(0, Number(e.target.value) || 0))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100" />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{rentalText(language, 'Booking commission', 'Commission du séjour')}</label>
+          <div className="relative">
+            <input type="number" min={0} max={100} step="any" value={commissionRate} onChange={e => setCommissionRate(e.target.value)} placeholder={rentalText(language, 'Decide later', 'Décider plus tard')} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-7 font-mono text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100" />
+            <span className="pointer-events-none absolute right-3 top-2 text-xs text-slate-400">%</span>
+          </div>
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{rentalText(language, 'Cleaning fee', 'Frais de ménage')}</label>
+          <input type="number" min={0} step="any" value={cleaningFee || ''} onChange={e => setCleaningFee(Math.max(0, Number(e.target.value) || 0))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100" />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{rentalText(language, 'Cleaning charged to', 'Ménage à la charge de')}</label>
+          <select value={cleaningChargeTo} onChange={e => setCleaningChargeTo(e.target.value as NonNullable<RentalBooking['cleaningChargeTo']>)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100">
+            <option value="owner">{rentalText(language, 'Owner', 'Propriétaire')}</option>
+            <option value="guest">{rentalText(language, 'Guest', 'Client')}</option>
+            <option value="management">{rentalText(language, 'Management', 'Notre société')}</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{language === 'en' ? 'Booking Source' : language === 'fr' ? 'Source réservation' : 'مصدر الحجز'}</label>
+          <input type="text" value={bookingSource} onChange={e => setBookingSource(e.target.value)} placeholder="Airbnb, Booking, Direct..." className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
+        </div>
       </div>
+      <textarea rows={2} value={bookingNotes} onChange={e => setBookingNotes(e.target.value)} placeholder={language === 'en' ? 'Check-in, checkout, cleaning, or guest notes...' : language === 'fr' ? 'Notes arrivée, départ, ménage ou client...' : 'ملاحظات الدخول، الخروج، التنظيف أو العميل...'} className="w-full resize-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-400 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100" />
+      {bookingError && (
+        <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300">
+          {bookingError}
+        </p>
+      )}
       {nights > 0 && (
         <div className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-950/50 rounded-lg p-3 space-y-1">
-          <div className="flex justify-between"><span>{nights} {t.rental.nights} × {ppn} {project.currency}</span><span>{previewTotal} {project.currency}</span></div>
-          <div className="flex justify-between"><span>{t.rental.commission} ({rate}%)</span><span className="text-emerald-600 dark:text-emerald-400">-{previewCommission} {project.currency}</span></div>
-          <div className="flex justify-between font-bold border-t border-slate-200 dark:border-slate-800 pt-1 mt-1"><span>{t.rental.ownerPayout}</span><span>{previewTotal - previewCommission} {project.currency}</span></div>
+          <div className="flex items-center justify-between border-b border-slate-200 pb-1 dark:border-slate-800">
+            <span>{rentalText(language, 'Stay status', 'Statut du séjour')}</span>
+            <span className="rounded-md bg-white px-2 py-0.5 text-[10px] font-bold uppercase text-purple-700 shadow-sm dark:bg-slate-900 dark:text-purple-300">
+              {previewStatus === 'completed'
+                ? (rentalText(language, 'Historical', 'Historique'))
+                : previewStatus === 'active'
+                  ? (rentalText(language, 'Active', 'En cours'))
+                  : (rentalText(language, 'Upcoming', 'À venir'))}
+            </span>
+          </div>
+          <div className="flex justify-between"><span>{nights} {t.rental.nights} × {nightlyRate} {project.currency}</span><span>{previewTotal} {project.currency}</span></div>
+          <div className="flex justify-between"><span>{t.rental.balanceDue}</span><span>{Math.max(0, previewTotal - Math.max(0, paidAmount))} {project.currency}</span></div>
+          <div className="border-t border-slate-200 pt-1 text-[10px] text-slate-400 dark:border-slate-800">{commissionRate === '' ? (rentalText(language, 'Commission will be decided in the monthly statement.', 'La commission sera décidée dans le relevé mensuel.')) : `${commissionRate}% ${rentalText(language, 'for this booking', 'pour ce séjour')}`}</div>
         </div>
       )}
       <div className="flex justify-end gap-2 pt-1">
@@ -3629,13 +4917,26 @@ function RentalBookingForm({ project, language, t, onSave }: {
 }
 
 /* ─── Rental Booking List ─── */
-function RentalBookingList({ project, language, t, onUpdate }: {
+function RentalBookingList({
+  project,
+  language,
+  t,
+  onUpdate,
+  onPrepareReceipt,
+  onRequestConfirm,
+  canManage,
+}: {
   project: Project;
   language: Language;
   t: any;
   onUpdate: (p: Project) => Promise<void>;
+  onPrepareReceipt: (booking: RentalBooking, payment: RentalBookingPayment) => void;
+  onRequestConfirm: (request: ConfirmRequest) => void;
+  canManage: boolean;
 }) {
   const bookings = project.rentalBookings || [];
+  const [editingBookingId, setEditingBookingId] = useState<string | null>(null);
+  const [paymentBookingId, setPaymentBookingId] = useState<string | null>(null);
 
   if (bookings.length === 0) {
     return (
@@ -3670,12 +4971,23 @@ function RentalBookingList({ project, language, t, onUpdate }: {
     await onUpdate(updated);
   };
 
-  const handleDelete = async (bookingId: string) => {
-    const updated: Project = {
-      ...project,
-      rentalBookings: (project.rentalBookings || []).filter(b => b.id !== bookingId),
-    };
-    await onUpdate(updated);
+  const requestDeleteBooking = (booking: RentalBooking) => {
+    onRequestConfirm({
+      title: rentalText(language, 'Delete booking?', 'Supprimer la réservation ?'),
+      message: language === 'fr'
+        ? `Supprimer définitivement la réservation de « ${booking.clientName} » du ${booking.checkIn} au ${booking.checkOut}, avec son historique de paiements ?`
+        : language === 'ar'
+          ? `حذف حجز « ${booking.clientName} » نهائياً من ${booking.checkIn} إلى ${booking.checkOut} مع سجل مدفوعاته؟`
+          : `Permanently remove ${booking.clientName}'s booking from ${booking.checkIn} to ${booking.checkOut}, including its payment history?`,
+      confirmLabel: rentalText(language, 'Delete booking', 'Supprimer la réservation'),
+      onConfirm: async () => {
+        const updated: Project = {
+          ...project,
+          rentalBookings: (project.rentalBookings || []).filter((item) => item.id !== booking.id),
+        };
+        await onUpdate(updated);
+      },
+    });
   };
 
   const sorted = [...bookings].sort((a, b) => a.checkIn.localeCompare(b.checkIn));
@@ -3693,9 +5005,19 @@ function RentalBookingList({ project, language, t, onUpdate }: {
               <div className="flex items-center gap-2 flex-wrap">
                 <p className="text-sm font-bold text-slate-900 dark:text-white">{b.clientName}</p>
                 {b.clientPhone && <span className="text-[10px] text-slate-400">{b.clientPhone}</span>}
+                {b.source && <span className="text-[10px] text-slate-400">{b.source}</span>}
                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${statusColors[b.status]}`}>
                   {statusLabels[b.status]}
                 </span>
+                {b.historicalEntry && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[9px] font-bold uppercase text-violet-700 dark:bg-violet-500/10 dark:text-violet-300"
+                    title={b.recordedAt ? new Date(b.recordedAt).toLocaleString() : undefined}
+                  >
+                    <Clock className="h-3 w-3" />
+                    {rentalText(language, 'Historical', 'Historique')}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-3 mt-1.5 text-xs text-slate-500 dark:text-slate-400 flex-wrap">
                 <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />{b.checkIn} → {b.checkOut}</span>
@@ -3705,30 +5027,339 @@ function RentalBookingList({ project, language, t, onUpdate }: {
             </div>
             <div className="text-right text-xs">
               <p className="font-bold text-slate-900 dark:text-white">{b.totalAmount} {project.currency}</p>
-              <p className="text-emerald-600 dark:text-emerald-400 text-[10px]">{t.rental.commission}: +{b.commission} {project.currency}</p>
-              <p className="text-slate-400 text-[10px]">{t.rental.ownerPayout}: {b.ownerPayout} {project.currency}</p>
+              {rentalBookingCommission(b, project) > 0
+                || b.commissionRate !== undefined
+                || project.rentalProperty?.monthlyCommissionRates?.[b.checkIn.slice(0, 7)] !== undefined ? (
+                <>
+                  <p className="text-emerald-600 dark:text-emerald-400 text-[10px]">{t.rental.commission}: {rentalBookingCommissionRate(b, project)}% · {rentalBookingCommission(b, project)} {project.currency}</p>
+                  <p className="text-slate-400 text-[10px]">{rentalText(language, 'Cleaning', 'Ménage')}: {b.cleaningFee || 0} {project.currency}</p>
+                </>
+              ) : (
+                <p className="text-[10px] text-amber-600 dark:text-amber-400">{rentalText(language, 'Commission pending the monthly owner statement.', 'Commission à décider dans le relevé mensuel.')}</p>
+              )}
+              <p className="text-slate-400 text-[10px]">
+                {t.rental.paidAmount}: {rentalBookingPaidAmount(b)} | {t.rental.balanceDue}: {rentalBookingBalanceDue(b)}
+              </p>
+              {rentalBookingOverpayment(b) > 0 && (
+                <p className="text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                  {rentalText(language, 'Overpayment / refund', 'Trop-perçu / remboursement')}: {rentalBookingOverpayment(b)} {project.currency}
+                </p>
+              )}
             </div>
           </div>
+          {b.notes && (
+            <p className="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-500 dark:bg-slate-950/50 dark:text-slate-400">
+              {b.notes}
+            </p>
+          )}
           <div className="flex items-center gap-2 mt-3 pt-2 border-t border-slate-100 dark:border-slate-800">
             <select
               value={b.status}
+              disabled={!canManage}
               onChange={e => handleStatusChange(b.id, e.target.value as RentalBookingStatus)}
-              className="text-[10px] px-2 py-1 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none cursor-pointer"
+              className="text-[10px] px-2 py-1 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none cursor-pointer disabled:cursor-default disabled:opacity-60"
             >
               <option value="upcoming">{t.rental.statuses.upcoming}</option>
               <option value="active">{t.rental.statuses.active}</option>
               <option value="completed">{t.rental.statuses.completed}</option>
               <option value="cancelled">{t.rental.statuses.cancelled}</option>
             </select>
-            <button
-              onClick={() => handleDelete(b.id)}
+            {canManage && <button
+              type="button"
+              onClick={() => setEditingBookingId(editingBookingId === b.id ? null : b.id)}
+              className="flex h-7 w-7 items-center justify-center rounded text-slate-400 transition-colors hover:bg-purple-50 hover:text-purple-700 dark:hover:bg-purple-950/30 dark:hover:text-purple-300"
+              title={rentalText(language, 'Edit booking', 'Modifier le séjour')}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>}
+            {canManage && <button
+              type="button"
+              onClick={() => setPaymentBookingId(paymentBookingId === b.id ? null : b.id)}
+              className={`inline-flex h-7 items-center gap-1.5 rounded px-2 text-[10px] font-bold transition-colors ${
+                paymentBookingId === b.id
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'
+                  : 'text-slate-500 hover:bg-emerald-50 hover:text-emerald-700 dark:hover:bg-emerald-950/30 dark:hover:text-emerald-300'
+              }`}
+              title={rentalText(language, 'Payments and receipts', 'Paiements et reçus')}
+            >
+              <CreditCard className="h-3.5 w-3.5" />
+              {rentalText(language, 'Payments', 'Paiements')}
+            </button>}
+            {canManage && <button
+              type="button"
+              onClick={() => requestDeleteBooking(b)}
+              title={rentalText(language, 'Delete booking', 'Supprimer la réservation')}
               className="text-[10px] text-red-500 hover:text-red-700 dark:hover:text-red-400 px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors cursor-pointer"
             >
               <Trash2 className="w-3 h-3" />
-            </button>
+            </button>}
           </div>
+          {editingBookingId === b.id && (
+            <RentalBookingEditor
+              booking={b}
+              project={project}
+              language={language}
+              onCancel={() => setEditingBookingId(null)}
+              onSave={async (nextBooking) => {
+                await onUpdate({
+                  ...project,
+                  rentalBookings: bookings.map((booking) => booking.id === nextBooking.id ? nextBooking : booking),
+                });
+                setEditingBookingId(null);
+              }}
+            />
+          )}
+          {paymentBookingId === b.id && (
+            <RentalBookingPayments
+              booking={b}
+              project={project}
+              language={language}
+              onPrepareReceipt={onPrepareReceipt}
+              onRequestConfirm={onRequestConfirm}
+              onSave={async (nextBooking) => {
+                await onUpdate({
+                  ...project,
+                  rentalBookings: bookings.map((booking) =>
+                    booking.id === nextBooking.id ? nextBooking : booking
+                  ),
+                });
+              }}
+            />
+          )}
         </div>
       ))}
+    </div>
+  );
+}
+
+function RentalBookingPayments({
+  booking,
+  project,
+  language,
+  onSave,
+  onPrepareReceipt,
+  onRequestConfirm,
+}: {
+  booking: RentalBooking;
+  project: Project;
+  language: Language;
+  onSave: (booking: RentalBooking) => Promise<void>;
+  onPrepareReceipt: (booking: RentalBooking, payment: RentalBookingPayment) => void;
+  onRequestConfirm: (request: ConfirmRequest) => void;
+}) {
+  const today = new Date().toISOString().split('T')[0];
+  const [amount, setAmount] = useState(0);
+  const [date, setDate] = useState(today);
+  const [method, setMethod] = useState<RentalPaymentMethod>('cash');
+  const [notes, setNotes] = useState('');
+  const [prepareReceipt, setPrepareReceipt] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const paid = rentalBookingPaidAmount(booking);
+  const balance = rentalBookingBalanceDue(booking);
+  const overpayment = rentalBookingOverpayment(booking);
+  const validAmount = Math.max(0, Number(amount) || 0);
+  const projectedPaid = paid + validAmount;
+  const projectedBalance = Math.max(0, booking.totalAmount - projectedPaid);
+
+  const savePayment = async () => {
+    if (!date || validAmount <= 0 || validAmount > balance) return;
+    setSaving(true);
+    const payment: RentalBookingPayment = {
+      id: `payment_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      date,
+      amount: validAmount,
+      method,
+      notes: notes.trim(),
+      receiptNumber: generateDocNumber(DEFAULT_DOC_PRESETS.receipt.prefix),
+      recordedAt: new Date().toISOString(),
+    };
+    const nextBooking = addRentalBookingPayment(booking, payment);
+    try {
+      await onSave(nextBooking);
+      if (prepareReceipt) onPrepareReceipt(nextBooking, payment);
+      setAmount(0);
+      setNotes('');
+      setDate(today);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removePayment = (payment: RentalBookingPayment) => {
+    onRequestConfirm({
+      title: rentalText(language, 'Remove this payment?', 'Supprimer ce paiement ?'),
+      message:
+        language === 'fr'
+          ? `Supprimer ${payment.amount} ${project.currency} payé le ${payment.date}. Le solde du client sera recalculé.`
+          : language === 'ar'
+            ? `حذف دفعة ${payment.amount} ${project.currency} المسجلة بتاريخ ${payment.date}. سيُعاد حساب رصيد العميل.`
+            : `Remove ${payment.amount} ${project.currency} paid on ${payment.date}. The guest balance will be recalculated.`,
+      confirmLabel: rentalText(language, 'Remove payment', 'Supprimer'),
+      variant: 'danger',
+      onConfirm: async () => {
+        await onSave(removeRentalBookingPayment(booking, payment.id));
+      },
+    });
+  };
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-lg border border-emerald-200 bg-emerald-50/40 dark:border-emerald-900/60 dark:bg-emerald-950/15">
+      <div className="grid grid-cols-2 divide-x divide-y divide-emerald-100 sm:grid-cols-4 sm:divide-y-0 dark:divide-emerald-900/50">
+        <PaymentMetric label={rentalText(language, 'Booking total', 'Total séjour')} value={`${booking.totalAmount} ${project.currency}`} />
+        <PaymentMetric label={rentalText(language, 'Paid to date', 'Déjà payé')} value={`${paid} ${project.currency}`} accent="text-emerald-700 dark:text-emerald-300" />
+        <PaymentMetric label={rentalText(language, 'Payment due', 'À encaisser')} value={`${balance} ${project.currency}`} accent={balance > 0 ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'} />
+        <PaymentMetric label={rentalText(language, 'After this payment', 'Après ce paiement')} value={`${projectedBalance} ${project.currency}`} />
+      </div>
+
+      {overpayment > 0 && (
+        <div className="border-t border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-semibold text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/20 dark:text-rose-300">
+          {rentalText(language, 'Overpayment to refund', 'Trop-perçu à rembourser')}: {overpayment} {project.currency}
+        </div>
+      )}
+
+      <div className="grid gap-2 border-t border-emerald-100 p-3 dark:border-emerald-900/50 sm:grid-cols-2 lg:grid-cols-6">
+        <label className="lg:col-span-1">
+          <span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Amount received', 'Montant reçu')}</span>
+          <input type="number" min={0} max={balance} step="any" value={amount || ''} onChange={(event) => setAmount(Math.max(0, Number(event.target.value) || 0))} className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" />
+        </label>
+        <label>
+          <span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Payment date', 'Date')}</span>
+          <DatePickerInput value={date} onChange={setDate} ariaLabel={rentalText(language, 'Payment date', 'Date du paiement')} />
+        </label>
+        <label>
+          <span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Method', 'Mode')}</span>
+          <select value={method} onChange={(event) => setMethod(event.target.value as RentalPaymentMethod)} className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950">
+            <option value="cash">{rentalText(language, 'Cash', 'Espèces')}</option>
+            <option value="bank_transfer">{rentalText(language, 'Bank transfer', 'Virement')}</option>
+            <option value="card">{rentalText(language, 'Card', 'Carte')}</option>
+            <option value="online">{rentalText(language, 'Online', 'En ligne')}</option>
+            <option value="other">{rentalText(language, 'Other', 'Autre')}</option>
+          </select>
+        </label>
+        <label className="sm:col-span-2 lg:col-span-2">
+          <span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Reference / notes', 'Référence / notes')}</span>
+          <input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder={rentalText(language, 'Deposit, transfer reference...', 'Acompte, référence...')} className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950" />
+        </label>
+        <div className="flex flex-col justify-end gap-1">
+          <label className="flex items-center gap-2 text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+            <input type="checkbox" checked={prepareReceipt} onChange={(event) => setPrepareReceipt(event.target.checked)} className="h-3.5 w-3.5 accent-emerald-600" />
+            {rentalText(language, 'Prepare receipt', 'Préparer le reçu')}
+          </label>
+          <button type="button" onClick={savePayment} disabled={saving || balance <= 0 || validAmount <= 0 || validAmount > balance} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-emerald-600 px-3 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-45">
+            <CreditCard className="h-3.5 w-3.5" />
+            {saving ? '...' : rentalText(language, 'Record payment', 'Enregistrer')}
+          </button>
+        </div>
+      </div>
+
+      {(booking.payments?.length || rentalBookingOpeningBalance(booking) > 0) && (
+        <div className="border-t border-emerald-100 px-3 py-2 dark:border-emerald-900/50">
+          <p className="mb-2 text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Payment history', 'Historique des paiements')}</p>
+          <div className="space-y-1.5">
+            {rentalBookingOpeningBalance(booking) > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white/80 px-2.5 py-2 text-[10px] dark:bg-slate-950/60">
+                <span className="font-semibold text-slate-600 dark:text-slate-300">{rentalText(language, 'Paid before detailed tracking', 'Solde payé avant le suivi détaillé')}</span>
+                <span className="font-mono font-bold">{rentalBookingOpeningBalance(booking)} {project.currency}</span>
+              </div>
+            )}
+            {(booking.payments || []).map((payment) => (
+              <div key={payment.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-white/80 px-2.5 py-2 dark:bg-slate-950/60">
+                <div className="min-w-0">
+                  <p className="text-[10px] font-bold text-slate-800 dark:text-slate-100">{payment.amount} {project.currency} · {payment.date}</p>
+                  <p className="truncate text-[9px] text-slate-400">{payment.method.replace('_', ' ')}{payment.notes ? ` · ${payment.notes}` : ''} · {payment.receiptNumber}</p>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button type="button" onClick={() => onPrepareReceipt(booking, payment)} className="inline-flex h-7 items-center gap-1 rounded px-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100 dark:text-emerald-300 dark:hover:bg-emerald-950/50" title={rentalText(language, 'Open receipt', 'Ouvrir le reçu')}>
+                    <ReceiptText className="h-3.5 w-3.5" />
+                    {rentalText(language, 'Receipt', 'Reçu')}
+                  </button>
+                  <button type="button" onClick={() => removePayment(payment)} className="flex h-7 w-7 items-center justify-center rounded text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/30" title={rentalText(language, 'Remove payment', 'Supprimer le paiement')}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentMetric({ label, value, accent = 'text-slate-900 dark:text-white' }: { label: string; value: string; accent?: string }) {
+  return (
+    <div className="bg-white/75 px-3 py-2.5 dark:bg-slate-950/40">
+      <span className="block text-[9px] font-bold uppercase text-slate-400">{label}</span>
+      <span className={`mt-1 block font-mono text-sm font-bold ${accent}`}>{value}</span>
+    </div>
+  );
+}
+
+function RentalBookingEditor({
+  booking,
+  project,
+  language,
+  onCancel,
+  onSave,
+}: {
+  booking: RentalBooking;
+  project: Project;
+  language: Language;
+  onCancel: () => void;
+  onSave: (booking: RentalBooking) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState({
+    clientName: booking.clientName,
+    checkIn: booking.checkIn,
+    checkOut: booking.checkOut,
+    nightlyRate: rentalBookingRate(booking, project.rentalProperty?.pricePerNight),
+    commissionRate: rentalBookingCommissionRate(booking, project),
+    cleaningFee: booking.cleaningFee || 0,
+    cleaningChargeTo: booking.cleaningChargeTo || 'owner',
+  });
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!draft.clientName.trim() || !draft.checkIn || !draft.checkOut || draft.checkOut <= draft.checkIn) return;
+    setSaving(true);
+    const totalNights = Math.max(1, Math.round(
+      (new Date(`${draft.checkOut}T12:00:00`).getTime() - new Date(`${draft.checkIn}T12:00:00`).getTime()) / 86_400_000
+    ));
+    const totalAmount = Math.round(totalNights * Math.max(0, draft.nightlyRate) * 100) / 100;
+    const commissionRate = Math.max(0, draft.commissionRate);
+    const commission = Math.round(totalAmount * commissionRate) / 100;
+    const ownerCleaning = draft.cleaningChargeTo === 'owner' ? Math.max(0, draft.cleaningFee) : 0;
+    await onSave(syncRentalBookingPaymentTotals({
+      ...booking,
+      clientName: draft.clientName.trim(),
+      checkIn: draft.checkIn,
+      checkOut: draft.checkOut,
+      totalNights,
+      nightlyRate: Math.max(0, draft.nightlyRate),
+      totalAmount,
+      commissionRate,
+      commission,
+      cleaningFee: Math.max(0, draft.cleaningFee),
+      cleaningChargeTo: draft.cleaningChargeTo as NonNullable<RentalBooking['cleaningChargeTo']>,
+      ownerPayout: Math.round((totalAmount - commission - ownerCleaning) * 100) / 100,
+      status: booking.status === 'cancelled'
+        ? 'cancelled'
+        : rentalBookingStatusForDates(draft.checkIn, draft.checkOut),
+    }));
+    setSaving(false);
+  };
+
+  return (
+    <div className="mt-3 grid grid-cols-2 gap-2 rounded-lg border border-purple-200 bg-purple-50/50 p-3 dark:border-purple-900/60 dark:bg-purple-950/20 sm:grid-cols-4">
+      <label className="col-span-2"><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Guest', 'Client')}</span><input value={draft.clientName} onChange={(event) => setDraft({ ...draft, clientName: event.target.value })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Check-in', 'Arrivée')}</span><DatePickerInput value={draft.checkIn} onChange={(value) => setDraft({ ...draft, checkIn: value })} ariaLabel={rentalText(language, 'Check-in', 'Arrivée')} inputClassName="h-8 text-[10px]" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Check-out', 'Départ')}</span><DatePickerInput value={draft.checkOut} min={draft.checkIn || undefined} onChange={(value) => setDraft({ ...draft, checkOut: value })} ariaLabel={rentalText(language, 'Check-out', 'Départ')} inputClassName="h-8 text-[10px]" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Rate / night', 'Prix / nuit')}</span><input type="number" min={0} step="any" value={draft.nightlyRate} onChange={(event) => setDraft({ ...draft, nightlyRate: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">Commission %</span><input type="number" min={0} max={100} step="any" value={draft.commissionRate} onChange={(event) => setDraft({ ...draft, commissionRate: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Cleaning', 'Ménage')}</span><input type="number" min={0} step="any" value={draft.cleaningFee} onChange={(event) => setDraft({ ...draft, cleaningFee: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Cleaning paid by', 'Ménage payé par')}</span><select value={draft.cleaningChargeTo} onChange={(event) => setDraft({ ...draft, cleaningChargeTo: event.target.value as typeof draft.cleaningChargeTo })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950"><option value="owner">{rentalText(language, 'Owner', 'Propriétaire')}</option><option value="guest">{rentalText(language, 'Guest', 'Client')}</option><option value="management">{rentalText(language, 'Management', 'Société')}</option></select></label>
+      <div className="col-span-2 flex justify-end gap-2 sm:col-span-4"><button type="button" onClick={onCancel} className="h-8 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold dark:border-slate-800 dark:bg-slate-950">{rentalText(language, 'Cancel', 'Annuler')}</button><button type="button" disabled={saving} onClick={save} className="h-8 rounded-md bg-purple-600 px-3 text-xs font-bold text-white disabled:opacity-60">{saving ? '...' : (rentalText(language, 'Save changes', 'Enregistrer'))}</button></div>
     </div>
   );
 }

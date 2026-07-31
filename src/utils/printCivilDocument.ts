@@ -1,18 +1,14 @@
-/** Paper format for invoice / voucher / receipt export */
-export type CivilDocPaperFormat = 'A4' | 'A5';
-
 /**
- * Opens the browser print dialog scoped to #printable-civil-bill only.
+ * Opens the browser print dialog scoped to one A4 invoice, voucher, or receipt.
  * User can choose "Save as PDF" as the destination (Chrome, Edge, Safari).
  */
 export function saveCivilDocumentAsPdf(
-  paperFormat: CivilDocPaperFormat,
-  suggestedFileName?: string
+  suggestedFileName?: string,
+  mode: 'single' | 'report' = 'single'
 ): void {
   const root = document.documentElement;
 
-  root.classList.remove('print-doc-a4', 'print-doc-a5');
-  root.classList.add(paperFormat === 'A4' ? 'print-doc-a4' : 'print-doc-a5');
+  root.classList.add(mode === 'report' ? 'print-doc-report' : 'print-doc-a4');
   document.body.classList.add('printing-document');
 
   const previousTitle = document.title;
@@ -22,7 +18,8 @@ export function saveCivilDocumentAsPdf(
   }
 
   const cleanup = () => {
-    root.classList.remove('print-doc-a4', 'print-doc-a5');
+    root.classList.remove('print-doc-a4');
+    root.classList.remove('print-doc-report');
     document.body.classList.remove('printing-document');
     document.title = previousTitle;
     window.removeEventListener('afterprint', cleanup);

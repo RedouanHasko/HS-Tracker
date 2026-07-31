@@ -3,6 +3,7 @@ import { Upload, Trash2, Loader2, Image as ImageIcon, FileText } from 'lucide-re
 import { Language } from '../types';
 import { compressImageForSparkPlan, compressImageFile, formatFileSize } from '../utils/imageCompression';
 import { isUsingFirestoreMedia } from '../lib/storage';
+import type { ConfirmRequest } from './ConfirmDialog';
 
 const LABELS = {
   en: {
@@ -43,6 +44,7 @@ interface ExpenseReceiptFieldProps {
   language: Language;
   value: ExpenseReceiptDraft | null;
   onChange: (draft: ExpenseReceiptDraft | null) => void;
+  onRequestConfirm?: (request: ConfirmRequest) => void;
   disabled?: boolean;
 }
 
@@ -53,6 +55,7 @@ export default function ExpenseReceiptField({
   language,
   value,
   onChange,
+  onRequestConfirm,
   disabled = false,
 }: ExpenseReceiptFieldProps) {
   const t = LABELS[language];
@@ -94,9 +97,29 @@ export default function ExpenseReceiptField({
   };
 
   const remove = () => {
-    if (value?.previewUrl) URL.revokeObjectURL(value.previewUrl);
-    onChange(null);
-    setError('');
+    const run = () => {
+      if (value?.previewUrl) URL.revokeObjectURL(value.previewUrl);
+      onChange(null);
+      setError('');
+    };
+    if (!onRequestConfirm) {
+      run();
+      return;
+    }
+    onRequestConfirm({
+      title: language === 'en'
+        ? 'Remove selected receipt?'
+        : language === 'fr'
+          ? 'Supprimer le reçu sélectionné ?'
+          : 'حذف الوصل المحدد؟',
+      message: language === 'en'
+        ? 'Remove this selected receipt image before saving the expense?'
+        : language === 'fr'
+          ? 'Supprimer cette image de reçu avant d’enregistrer la dépense ?'
+          : 'حذف صورة الوصل المحددة قبل حفظ المصروف؟',
+      confirmLabel: t.remove,
+      onConfirm: run,
+    });
   };
 
   return (

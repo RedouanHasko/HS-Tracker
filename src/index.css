@@ -1,6 +1,12 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
+.hs-date-picker-input::-webkit-calendar-picker-indicator {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
 @variant dark (&:where(.dark, .dark *));
 
 @theme {
@@ -38,13 +44,60 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+}
+
 /* Installed PWA — respect iPhone notch / home indicator */
 body {
   font-family: var(--font-sans);
   background-color: #f8fafc;
   color: #0f172a;
+  overflow-x: hidden;
   padding-top: var(--safe-top);
   padding-bottom: var(--safe-bottom);
+}
+
+img,
+video,
+canvas {
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  min-width: 0;
+}
+
+select {
+  color-scheme: light;
+}
+
+select option,
+select optgroup {
+  background-color: #ffffff;
+  color: #1d1d20;
+}
+
+.dark select {
+  color: #f2f2f5;
+  color-scheme: dark;
+}
+
+.dark select option,
+.dark select optgroup {
+  background-color: #1d1d20;
+  color: #f2f2f5;
+}
+
+.dark select option:disabled {
+  color: #9999a1;
 }
 
 .navbar-sticky {
@@ -83,7 +136,8 @@ body {
   }
 
   body.printing-document #printable-civil-bill {
-    position: static !important;
+    position: fixed !important;
+    inset: 0 auto auto 0 !important;
     width: 100% !important;
     max-width: none !important;
     min-height: 0 !important;
@@ -95,7 +149,13 @@ body {
     box-shadow: none !important;
     background: white !important;
     color: #0f172a !important;
-    overflow: visible !important;
+    overflow: hidden !important;
+    break-before: avoid-page;
+    break-after: avoid-page;
+    break-inside: avoid-page;
+    page-break-before: avoid;
+    page-break-after: avoid;
+    page-break-inside: avoid;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
@@ -136,22 +196,28 @@ body {
 
 /* Named @page sizes for civil document export */
 @media print {
-  @page civil-a4 {
+  @page {
     size: A4 portrait;
-    margin: 12mm;
-  }
-
-  @page civil-a5 {
-    size: A5 portrait;
     margin: 10mm;
   }
 
   html.print-doc-a4 #printable-civil-bill {
-    page: civil-a4;
+    width: 190mm !important;
+    height: 277mm !important;
+    max-height: 277mm !important;
   }
 
-  html.print-doc-a5 #printable-civil-bill {
-    page: civil-a5;
+  html.print-doc-report #printable-civil-bill {
+    position: static !important;
+    width: 190mm !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  html.print-doc-report #printable-civil-bill section {
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 
   .print-page-a4 {
@@ -160,11 +226,6 @@ body {
     margin: 0 auto;
   }
 
-  .print-page-a5 {
-    width: 100%;
-    max-width: 128mm;
-    margin: 0 auto;
-  }
 }
 
 /* Premium Card and Interactive Borders in Dark Mode */
@@ -397,11 +458,26 @@ body {
   transform: scale(0.97);
 }
 
-.ai-bot-eye {
+.ai-bot-eye-socket {
   display: block;
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 9999px;
+  overflow: visible;
+  transform-origin: center;
+  transition: transform 70ms ease-in;
+}
+
+.ai-bot-eye-socket.is-blinking {
+  transform: scaleY(0.08);
+  transition-duration: 45ms;
+}
+
+.ai-bot-eye {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
   background: #06b6d4;
   will-change: transform;
 }
@@ -410,3 +486,8 @@ body {
   background: #22d3ee;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .ai-bot-eye-socket {
+    transition: none;
+  }
+}

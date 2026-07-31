@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { auth } from '../lib/firebase';
 import { 
   createUserWithEmailAndPassword, 
@@ -7,11 +7,12 @@ import {
   GoogleAuthProvider,
   signInWithPopup
 } from 'firebase/auth';
-import { Mail, Lock, User, ArrowRight, Chrome } from 'lucide-react';
+import { Mail, Lock, User, ArrowRight, Chrome, Globe, Moon, Sun } from 'lucide-react';
 import { HSLogo } from './HSLogo';
 import { AppFooter } from './AppFooter';
 import InstallAppPrompt from './InstallAppPrompt';
-import { getLanguage } from '../utils/mockData';
+import { getLanguage, saveLanguage } from '../utils/mockData';
+import { Language } from '../types';
 
 export const AuthBoard: React.FC = () => {
   const [isSignUp, setIsSignUp] = useState(false);
@@ -20,6 +21,20 @@ export const AuthBoard: React.FC = () => {
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [language, setLanguage] = useState<Language>(() => getLanguage());
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => localStorage.getItem('buildtrack_theme') === 'dark' ? 'dark' : 'light');
+
+  useEffect(() => {
+    localStorage.setItem('buildtrack_theme', theme);
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.body.classList.toggle('dark', theme === 'dark');
+  }, [theme]);
+
+  const cycleLanguage = () => {
+    const next = language === 'en' ? 'fr' : language === 'fr' ? 'ar' : 'en';
+    setLanguage(next);
+    saveLanguage(next);
+  };
 
   const handleGoogleSignIn = async () => {
     setError(null);
@@ -74,11 +89,32 @@ export const AuthBoard: React.FC = () => {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50 dark:bg-slate-950 selection:bg-sky-500/30 selection:text-sky-900 dark:selection:text-sky-100">
-      <div className="flex flex-1 items-center justify-center p-4">
+    <div className="relative flex min-h-[100dvh] flex-col bg-slate-50 dark:bg-slate-950 selection:bg-sky-500/30 selection:text-sky-900 dark:selection:text-sky-100">
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded-lg border border-slate-200 bg-white/90 p-1 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/90 sm:right-4 sm:top-4">
+        <button
+          type="button"
+          onClick={cycleLanguage}
+          className="flex h-8 min-w-8 items-center justify-center gap-1 rounded-md px-2 text-[10px] font-bold text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+          title="Change language"
+          aria-label="Change language"
+        >
+          <Globe className="h-3.5 w-3.5" />
+          <span className="font-mono">{language.toUpperCase()}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setTheme((current) => current === 'light' ? 'dark' : 'light')}
+          className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+          title={theme === 'light' ? 'Dark mode' : 'Light mode'}
+          aria-label={theme === 'light' ? 'Dark mode' : 'Light mode'}
+        >
+          {theme === 'light' ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5 text-amber-500" />}
+        </button>
+      </div>
+      <div className="flex flex-1 items-center justify-center px-3 pb-4 pt-16 sm:p-4">
       <div className="w-full max-w-md">
         {/* Header */}
-        <div className="flex flex-col items-center justify-center mb-8 text-center">
+        <div className="mb-5 flex flex-col items-center justify-center text-center sm:mb-8">
           <div className="mb-4 relative">
             <div className="absolute inset-0 blur-2xl bg-sky-500/20 dark:bg-sky-500/20 rounded-full scale-150"></div>
             <HSLogo className="w-48 max-w-[85vw] drop-shadow-xl relative z-10" />
@@ -89,7 +125,7 @@ export const AuthBoard: React.FC = () => {
         </div>
 
         {/* Card */}
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl shadow-slate-200/50 dark:shadow-black/50 backdrop-blur-xl relative z-10">
+        <div className="relative z-10 rounded-xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-200/50 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/50 sm:rounded-3xl sm:p-8">
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             
             {error && (
@@ -211,7 +247,7 @@ export const AuthBoard: React.FC = () => {
       </div>
       </div>
       <AppFooter variant="compact" />
-      <InstallAppPrompt language={getLanguage()} />
+      <InstallAppPrompt language={language} />
     </div>
   );
 };

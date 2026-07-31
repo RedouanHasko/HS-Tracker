@@ -8,6 +8,7 @@ import {
   query, 
   where, 
   orderBy, 
+  limit,
   deleteDoc,
   updateDoc,
   onSnapshot
@@ -176,6 +177,17 @@ function normalizeProjectForFirestore(project: Project): Project {
     photos: project.photos ?? [],
     documents: project.documents ?? [],
     reimbursements: project.reimbursements ?? [],
+    rentalBookings: project.rentalBookings ?? [],
+    rentalOwnerPayments: project.rentalOwnerPayments ?? [],
+    ...(project.rentalProperty
+      ? {
+          rentalProperty: {
+            ...project.rentalProperty,
+            commissionRate: Number(project.rentalProperty.commissionRate) || 0,
+            pricePerNight: Number(project.rentalProperty.pricePerNight) || 0,
+          },
+        }
+      : {}),
   };
 }
 
@@ -200,13 +212,8 @@ export const saveProjectToDB = async (userId: string, project: Project) => {
     });
 
     const projectRef = doc(db, 'projects', project.id);
-    const existing = await getDoc(projectRef);
-    if (existing.exists()) {
-      // Merge avoids wiping fields missing from the client snapshot (fixes permission diffs for members).
-      await setDoc(projectRef, updatedProject, { merge: true });
-    } else {
-      await setDoc(projectRef, updatedProject);
-    }
+    // A merge creates missing documents too, avoiding one billed read before every write.
+    await setDoc(projectRef, updatedProject, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `projects/${project.id}`);
   }
@@ -399,20 +406,6 @@ export const saveActivityToDB = async (userId: string, activity: TimelineActivit
 const sortActivitiesByTime = (items: TimelineActivity[]) =>
   items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-const mergeActivities = (sets: TimelineActivity[][]): TimelineActivity[] => {
-  const seen = new Set<string>();
-  const merged: TimelineActivity[] = [];
-  for (const list of sets) {
-    for (const item of list) {
-      if (!seen.has(item.id)) {
-        seen.add(item.id);
-        merged.push(item);
-      }
-    }
-  }
-  return sortActivitiesByTime(merged);
-};
-
 /** Secure dashboard feed — query matches rules via denormalized memberEmails. */
 export const getActivitiesForUserEmail = async (userEmail: string): Promise<TimelineActivity[]> => {
   const email = userEmail.toLowerCase().trim();
@@ -420,7 +413,12 @@ export const getActivitiesForUserEmail = async (userEmail: string): Promise<Time
 
   try {
     const actRef = collection(db, 'activities');
-    const q = query(actRef, where('memberEmails', 'array-contains', email));
+    const q = query(
+      actRef,
+      where('memberEmails', 'array-contains', email),
+      orderBy('timestamp', 'desc'),
+      limit(30)
+    );
     const snap = await getDocs(q);
     return sortActivitiesByTime(snap.docs.map((d) => d.data() as TimelineActivity));
   } catch (error) {
@@ -430,11 +428,21 @@ export const getActivitiesForUserEmail = async (userEmail: string): Promise<Time
 };
 
 /** Legacy activities (no memberEmails field) — one equality query per project (rules-friendly). */
-export const getActivitiesForProject = async (projectId: string): Promise<TimelineActivity[]> => {
-  if (!projectId) return [];
+export const getActivitiesForProject = async (
+  projectId: string,
+  userEmail: string,
+): Promise<TimelineActivity[]> => {
+  const email = userEmail.toLowerCase().trim();
+  if (!projectId || !email) return [];
   try {
     const actRef = collection(db, 'activities');
-    const q = query(actRef, where('projectId', '==', projectId));
+    const q = query(
+      actRef,
+      where('projectId', '==', projectId),
+      where('memberEmails', 'array-contains', email),
+      orderBy('timestamp', 'desc'),
+      limit(30)
+    );
     const snap = await getDocs(q);
     return snap.docs.map((d) => d.data() as TimelineActivity);
   } catch (error) {
@@ -443,17 +451,12 @@ export const getActivitiesForProject = async (projectId: string): Promise<Timeli
   }
 };
 
-/** Dashboard: denormalized query + per-project fallback for older activity docs. */
+/** Dashboard feed: membership is part of the query so Firestore can authorize it. */
 export const getDashboardActivities = async (
   userEmail: string,
-  projectIds: string[],
+  _projectIds: string[],
 ): Promise<TimelineActivity[]> => {
-  const uniqueIds = [...new Set(projectIds.filter(Boolean))];
-  const [byMember, ...byProject] = await Promise.all([
-    getActivitiesForUserEmail(userEmail),
-    ...uniqueIds.map((id) => getActivitiesForProject(id)),
-  ]);
-  return mergeActivities([byMember, ...byProject]);
+  return getActivitiesForUserEmail(userEmail);
 };
 
 /** @deprecated Use getDashboardActivities — kept for single-project callers */
@@ -463,8 +466,8 @@ export const getActivitiesFromDB = async (
   projectIds?: string[],
   userEmail?: string,
 ): Promise<TimelineActivity[]> => {
-  if (projectId) {
-    return getActivitiesForProject(projectId);
+  if (projectId && userEmail) {
+    return getActivitiesForProject(projectId, userEmail);
   }
   if (userEmail && projectIds) {
     return getDashboardActivities(userEmail, projectIds);
@@ -475,19 +478,30 @@ export const getActivitiesFromDB = async (
   return [];
 };
 
-export const subscribeToActivities = (projectId: string, callback: (activities: TimelineActivity[]) => void) => {
-  if (!projectId) {
+export const subscribeToActivities = (
+  projectId: string,
+  userEmail: string,
+  callback: (activities: TimelineActivity[]) => void,
+) => {
+  const email = userEmail.toLowerCase().trim();
+  if (!projectId || !email) {
     callback([]);
     return () => {};
   }
   const actRef = collection(db, 'activities');
-  const q = query(actRef, where("projectId", "==", projectId));
+  const q = query(
+    actRef,
+    where("projectId", "==", projectId),
+    where("memberEmails", "array-contains", email),
+    orderBy("timestamp", "desc"),
+    limit(100)
+  );
   return onSnapshot(q, (snap) => {
     const results = snap.docs.map(doc => doc.data() as TimelineActivity);
     results.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
     callback(results);
   }, (error) => {
-    console.warn("Activities listener error or index not ready yet:", error);
+    console.warn("Activities listener error:", error);
   });
 };
 
@@ -557,7 +571,7 @@ export const getNotificationsFromDB = async (userId: string): Promise<any[]> => 
   if (!userId) return [];
   try {
     const notifRef = collection(db, `users/${userId}/notifications`);
-    const q = query(notifRef, orderBy("timestamp", "desc"));
+    const q = query(notifRef, orderBy("timestamp", "desc"), limit(100));
     const querySnapshot = await getDocs(q);
     return querySnapshot.docs.map(doc => doc.data());
   } catch (error) {
@@ -572,7 +586,7 @@ export const subscribeToNotifications = (userId: string, callback: (notification
     return () => {};
   }
   const notifRef = collection(db, `users/${userId}/notifications`);
-  const q = query(notifRef, orderBy("timestamp", "desc"));
+  const q = query(notifRef, orderBy("timestamp", "desc"), limit(100));
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map(doc => doc.data() as AppNotification));
   }, (error) => {
@@ -635,4 +649,3 @@ export const saveUserProfileToDB = async (userId: string, profile: UserProfile) 
     handleFirestoreError(error, OperationType.WRITE, `users/${userId}/profile/details`);
   }
 };
-

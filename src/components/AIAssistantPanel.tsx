@@ -28,10 +28,15 @@ import {
   AIApplyContext,
   sanitizeProposedActions,
   isInformationalQuery,
+  parseAIConfirmationMessage,
+  isAICancellationMessage,
   extractTaskIdFromAction,
   extractExpenseIdFromAction,
+  findRentalBooking,
 } from '../utils/aiActions';
 import { parseDocumentDraft, AIDocumentDraft } from '../utils/aiDocumentDraft';
+import { buildRentalPaymentReceiptDraft } from '../utils/rentalPaymentReceipt';
+import { inferRentalBookingAction } from '../utils/aiRentalIntent';
 import { askProjectAssistant, AISessionHints, AIChatTurn } from '../utils/aiAgent';
 import {
   getStoredGeminiApiKey,
@@ -212,6 +217,7 @@ export default function AIAssistantPanel({
   const [sessionHints, setSessionHints] = useState<AISessionHints>({});
   const [undoCount, setUndoCount] = useState(0);
   const [pendingActions, setPendingActions] = useState<AIProposedAction[] | null>(null);
+  const [pendingNavigation, setPendingNavigation] = useState<AIUIAction[] | null>(null);
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null);
   const [showRemoveKeyConfirm, setShowRemoveKeyConfirm] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -252,6 +258,7 @@ export default function AIAssistantPanel({
   const startNewConversation = () => {
     setSessionHints({});
     setPendingActions(null);
+    setPendingNavigation(null);
     setPendingMessageId(null);
     setInput('');
     setImageFile(null);
@@ -294,9 +301,9 @@ export default function AIAssistantPanel({
       }
       if (scopeKey !== conversationProjectRef.current) {
         conversationProjectRef.current = scopeKey;
-        setMessages([welcomeMessage()]);
         setSessionHints({});
         setPendingActions(null);
+        setPendingNavigation(null);
         setPendingMessageId(null);
       } else if (messages.length === 0) {
         setMessages([welcomeMessage()]);
@@ -327,9 +334,56 @@ export default function AIAssistantPanel({
 
   const handleSend = async () => {
     if (busy || (!input.trim() && !imageFile)) return;
-    if (!keyConfigured) return;
 
     const userText = input.trim() || (imageFile ? t.attach : '');
+    const confirmation = !imageFile ? parseAIConfirmationMessage(userText) : null;
+
+    if (confirmation) {
+      setMessages((messages) => [
+        ...messages,
+        { id: `u_${Date.now()}`, role: 'user', text: userText },
+      ]);
+      setInput('');
+      if (pendingActions?.length) {
+        await handleConfirmActions(confirmation.followUp);
+      } else {
+        setMessages((messages) => [
+          ...messages,
+          {
+            id: `sys_${Date.now()}`,
+            role: 'assistant',
+            text: language === 'fr'
+              ? 'Aucune modification structurée n’est en attente. Rien n’a été enregistré.'
+              : language === 'ar'
+                ? 'لا يوجد تغيير منظم بانتظار التأكيد. لم يتم حفظ أي شيء.'
+                : 'There is no pending structured change to apply. Nothing was saved.',
+          },
+        ]);
+      }
+      return;
+    }
+
+    if (!imageFile && isAICancellationMessage(userText)) {
+      setMessages((messages) => [
+        ...messages,
+        { id: `u_${Date.now()}`, role: 'user', text: userText },
+        {
+          id: `sys_${Date.now()}`,
+          role: 'assistant',
+          text: language === 'fr'
+            ? 'Proposition annulée. Aucune donnée n’a été modifiée.'
+            : language === 'ar'
+              ? 'تم إلغاء الاقتراح. لم يتم تعديل أي بيانات.'
+              : 'Proposal dismissed. No data was changed.',
+        },
+      ]);
+      setInput('');
+      handleDismissActions();
+      return;
+    }
+
+    if (!keyConfigured) return;
+
     const historyBeforeSend = buildHistoryForApi(messages);
 
     const userMsg: ChatMessage = {
@@ -355,6 +409,18 @@ export default function AIAssistantPanel({
         historyBeforeSend
       );
       let actions = sanitizeProposedActions(response.proposedActions);
+      if (actions.length === 0) {
+        const inferredBooking = inferRentalBookingAction(userText, projects, project);
+        if (inferredBooking) {
+          actions = [inferredBooking];
+          const target = resolveProjectFromParams(projects, inferredBooking.params, project);
+          response.message = language === 'fr'
+            ? `Réservation préparée pour ${inferredBooking.params.clientName} dans ${target?.rentalProperty?.buildingNumber || target?.name || 'le logement'}. Confirmez pour l’enregistrer.`
+            : language === 'ar'
+              ? `تم إعداد الحجز للعميل ${inferredBooking.params.clientName} في ${target?.rentalProperty?.buildingNumber || target?.name || 'العقار'}. أكّد لحفظه.`
+              : `Booking prepared for ${inferredBooking.params.clientName} at ${target?.rentalProperty?.buildingNumber || target?.name || 'the property'}. Confirm to save it.`;
+        }
+      }
 
       if (project) {
         const ctx = buildApplyCtx(project);
@@ -368,8 +434,12 @@ export default function AIAssistantPanel({
       }
 
       if (response.uiActions?.length && onNavigate) {
-        onNavigate(response.uiActions);
-        onClose();
+        if (actions.length > 0) {
+          setPendingNavigation(response.uiActions);
+        } else {
+          onNavigate(response.uiActions);
+          onClose();
+        }
       }
 
       setMessages((m) =>
@@ -398,15 +468,19 @@ export default function AIAssistantPanel({
     }
   };
 
-  const handleConfirmActions = async () => {
-    if (!pendingActions?.length) return;
+  const handleConfirmActions = async (confirmationFollowUp = '') => {
+    if (!pendingActions?.length || busy) return;
+    setBusy(true);
 
-    const docAction = pendingActions.find((a) => a.type === 'prepare_document');
-    const projectActions = pendingActions.filter((a) => a.type !== 'prepare_document');
+    try {
+      const docAction = pendingActions.find((a) => a.type === 'prepare_document');
+      const projectActions = pendingActions.filter((a) => a.type !== 'prepare_document');
 
-    const notes: string[] = [];
+      const notes: string[] = [];
+      let paymentReceiptDraft: { draft: AIDocumentDraft; projectId: string } | null = null;
+      let lastAppliedProject: Project | null = null;
 
-    if (projectActions.length > 0) {
+      if (projectActions.length > 0) {
       const grouped = new Map<string, AIProposedAction[]>();
       for (const action of projectActions) {
         const target = resolveProjectFromParams(projects, action.params, project);
@@ -434,7 +508,21 @@ export default function AIAssistantPanel({
         pushUndoSnapshot(target);
         const { project: next, errors } = applyAIActions(target, actionsForProject, ctx);
         await onApplyProject(next);
+        lastAppliedProject = next;
+        conversationProjectRef.current = next.id;
         onSelectProject?.(next.id);
+
+        for (const action of actionsForProject) {
+          if (action.type !== 'record_booking_payment' || action.params.prepareReceipt === false) continue;
+          const booking = findRentalBooking(next, action.params);
+          const payment = booking?.payments?.[booking.payments.length - 1];
+          if (booking && payment) {
+            paymentReceiptDraft = {
+              draft: buildRentalPaymentReceiptDraft(next, booking, payment),
+              projectId: next.id,
+            };
+          }
+        }
 
         let lastTaskId: string | null = null;
         let lastExpenseId: string | null = null;
@@ -456,33 +544,87 @@ export default function AIAssistantPanel({
         if (errors.length > 0) notes.push(`${t.partial}\n${errors.join('\n')}`);
         else notes.push(t.applied);
       }
-    }
+      }
 
-    if (docAction && onApplyDocumentDraft) {
+      if (paymentReceiptDraft && onApplyDocumentDraft) {
+      onApplyDocumentDraft(paymentReceiptDraft.draft, paymentReceiptDraft.projectId);
+      onSelectProject?.(paymentReceiptDraft.projectId);
+      notes.push(
+        language === 'fr'
+          ? 'Paiement enregistré et reçu ouvert. Utilisez Annuler pour restaurer les données précédentes.'
+          : 'Payment recorded and receipt opened. Use Undo to restore the previous data.'
+      );
+      }
+
+      if (docAction && onApplyDocumentDraft) {
       const docTarget = resolveProjectFromParams(projects, docAction.params, project);
       if (docTarget) {
-        onApplyDocumentDraft(parseDocumentDraft(docAction.params), docTarget.id);
+        const draft = parseDocumentDraft(docAction.params);
+        onApplyDocumentDraft(draft, docTarget.id);
         onSelectProject?.(docTarget.id);
         notes.push(
           language === 'en'
-            ? 'Document draft ready — open Invoices & Vouchers tab, review, then Print.'
+            ? draft.autoExport
+              ? 'Document draft ready. Opening the PDF print dialog.'
+              : 'Document draft ready - open Invoices & Vouchers, review, then print.'
             : language === 'fr'
-              ? 'Brouillon prêt — onglet Factures, vérifiez puis Imprimer.'
+              ? draft.autoExport
+                ? "Brouillon prêt. Ouverture de l'impression PDF."
+                : 'Brouillon prêt - vérifiez-le dans Factures puis imprimez.'
               : 'المسودة جاهزة — راجع الفواتير ثم اطبع.'
         );
       }
-    }
+      }
 
-    if (notes.length) {
-      setMessages((m) => [...m, { id: `sys_${Date.now()}`, role: 'assistant', text: `✓ ${notes.join('\n')}` }]);
+      if (notes.length) {
+        setMessages((m) => [...m, { id: `sys_${Date.now()}`, role: 'assistant', text: `✓ ${notes.join('\n')}` }]);
+      }
+      setPendingActions(null);
+      setPendingMessageId(null);
+      const followUpNavigation: AIUIAction[] =
+        confirmationFollowUp && lastAppliedProject
+          ? [
+              { type: 'open_project', params: { projectId: lastAppliedProject.id } },
+              confirmationFollowUp.match(/\b(booking|bookings|reservation|reservations|stay|guest|client)\b/i)
+                ? { type: 'open_tab', params: { tab: 'rental' } }
+                : confirmationFollowUp.match(/\b(invoice|invoices|voucher|receipt|document)\b/i)
+                  ? { type: 'open_tab', params: { tab: 'docs' } }
+                  : confirmationFollowUp.match(/\b(task|tasks|roadmap)\b/i)
+                    ? { type: 'open_tab', params: { tab: 'tasks' } }
+                    : confirmationFollowUp.match(/\b(expense|expenses|cost|ledger)\b/i)
+                      ? { type: 'open_tab', params: { tab: 'expenses' } }
+                      : { type: 'open_tab', params: { tab: 'overview' } },
+            ]
+          : [];
+      const navigationToRun = followUpNavigation.length > 0 ? followUpNavigation : pendingNavigation;
+      if (navigationToRun?.length && onNavigate) {
+        onNavigate(navigationToRun);
+        setPendingNavigation(null);
+        onClose();
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setMessages((messages) => [
+        ...messages,
+        {
+          id: `error_${Date.now()}`,
+          role: 'assistant',
+          text: language === 'fr'
+            ? `⚠ L’enregistrement a échoué. Aucune confirmation de sauvegarde n’a été reçue. Réessayez ou vérifiez Firebase.\n${detail}`
+            : language === 'ar'
+              ? `⚠ فشل الحفظ ولم يتم تأكيد الكتابة في Firebase. أعد المحاولة أو تحقق من الاتصال.\n${detail}`
+              : `⚠ Save failed. Firebase did not confirm the write. Retry or check the connection.\n${detail}`,
+        },
+      ]);
+    } finally {
+      setBusy(false);
     }
-    setPendingActions(null);
-    setPendingMessageId(null);
   };
 
   const handleDismissActions = () => {
     setPendingActions(null);
     setPendingMessageId(null);
+    setPendingNavigation(null);
   };
 
   const handleUndo = async () => {
@@ -744,10 +886,11 @@ export default function AIAssistantPanel({
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={handleConfirmActions}
-                  className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-cyan-600 py-2 text-[11px] font-bold text-white"
+                  onClick={() => handleConfirmActions()}
+                  disabled={busy}
+                  className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-cyan-600 py-2 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <Check className="h-3.5 w-3.5" />
+                  {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
                   {t.confirm}
                 </button>
                 <button

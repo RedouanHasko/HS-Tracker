@@ -1,3 +1,4 @@
+import React from 'react';
 import { motion } from 'motion/react';
 import { HSLogo } from '../HSLogo';
 
@@ -68,6 +69,7 @@ export function FadeIn({
   children: React.ReactNode;
   className?: string;
   delay?: number;
+  key?: React.Key;
 }) {
   return (
     <motion.div

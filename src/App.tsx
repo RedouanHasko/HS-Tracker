@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Home, 
@@ -9,20 +9,19 @@ import {
   Sun, 
   Moon, 
   Users, 
-  Briefcase,
   X,
   FileText,
   Sliders,
   LogOut,
   Building,
   KeyRound,
+  TrendingUp,
+  Calendar,
+  Image,
 } from 'lucide-react';
 import { initializeDB, getLanguage, saveLanguage } from './utils/mockData';
 import { saveProjectToDB, subscribeToProjects, registerUserProfileIfNeeded } from './lib/db';
 import { Language, Project } from './types';
-import Dashboard from './components/Dashboard';
-import ProjectDetail from './components/ProjectDetail';
-import RentalDashboard from './components/RentalDashboard';
 import WelcomePage from './components/WelcomePage';
 import ProfileModal from './components/ProfileModal';
 import NotificationsPanel from './components/NotificationsPanel';
@@ -34,10 +33,15 @@ import { useEscapeToClose } from './hooks/useEscapeToClose';
 import { AppFooter } from './components/AppFooter';
 import { useMotionConfig } from './utils/motionPresets';
 import InstallAppPrompt from './components/InstallAppPrompt';
-import AIAssistantPanel from './components/AIAssistantPanel';
 import AIAssistantFab from './components/AIAssistantFab';
+import { AppLoader } from './components/ui/AppLoader';
 import { executeAIUINavigationPlan, PendingAiNav, AIUIAction } from './utils/aiNavigation';
 import { AIDocumentDraft } from './utils/aiDocumentDraft';
+
+const Dashboard = lazy(() => import('./components/Dashboard'));
+const ProjectDetail = lazy(() => import('./components/ProjectDetail'));
+const RentalDashboard = lazy(() => import('./components/RentalDashboard'));
+const AIAssistantPanel = lazy(() => import('./components/AIAssistantPanel'));
 
 const SIDEBAR_TRANSLATIONS = {
   en: {
@@ -120,11 +124,22 @@ const SIDEBAR_TRANSLATIONS = {
   }
 };
 
+const WORKSPACE_OPTIONS = {
+  construction: [
+    { id: 'documents', icon: FileText, labelEn: 'Documents', labelFr: 'Documents', labelAr: 'مستندات' },
+    { id: 'gallery', icon: Image, labelEn: 'Gallery', labelFr: 'Galerie', labelAr: 'معرض' },
+  ],
+  rental: [
+    { id: 'bookings', icon: Calendar, labelEn: 'Bookings', labelFr: 'Réservations', labelAr: 'حجوزات' },
+    { id: 'revenue', icon: TrendingUp, labelEn: 'Revenue', labelFr: 'Revenus', labelAr: 'إيرادات' },
+  ],
+};
+
 export default function App() {
   const { user, signOut } = useAuth();
   const { page, modal, modalVariants, overlayVariants, overlay } = useMotionConfig();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [currentView, setCurrentView] = useState<'welcome' | 'construction' | 'service' | 'rental'>('welcome');
+  const [currentView, setCurrentView] = useState<'welcome' | 'construction' | 'rental'>('welcome');
   const [language, setLanguage] = useState<Language>('en');
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   
@@ -137,8 +152,10 @@ export default function App() {
   const [sidebarFilter, setSidebarFilter] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [sidebarOption, setSidebarOption] = useState<string | null>(null);
   const [showAIAssistant, setShowAIAssistant] = useState(false);
   const [pendingAiNav, setPendingAiNav] = useState<PendingAiNav | null>(null);
+  const [pendingProjectSettingsId, setPendingProjectSettingsId] = useState<string | null>(null);
   const [pendingAiDocumentDraft, setPendingAiDocumentDraft] = useState<{
     projectId: string;
     draft: AIDocumentDraft;
@@ -157,7 +174,7 @@ export default function App() {
   const [clientName, setClientName] = useState('');
   const [address, setAddress] = useState('');
   const [description, setDescription] = useState('');
-  const [budget, setBudget] = useState(120000);
+  const [budget, setBudget] = useState(0);
   const [currency, setCurrency] = useState('DH');
 
   // Swipe gesture handling
@@ -232,8 +249,27 @@ export default function App() {
       executeAIUINavigationPlan(actions, {
         projects,
         activeProject,
-        onSelectProject: (id) => setSelectedProjectId(id),
+        onSelectProject: (id) => {
+          const target = projects.find((item) => item.id === id);
+          if (target?.projectType === 'rental') setCurrentView('rental');
+          else if (target) setCurrentView('construction');
+          setSelectedProjectId(id);
+          setSidebarOption(null);
+          closeSidebarOnMobile();
+        },
         openDashboard: () => setSelectedProjectId(null),
+        openRentalDashboard: (section) => {
+          setCurrentView('rental');
+          setSelectedProjectId(null);
+          setSidebarOption(section === 'portfolio' ? null : section);
+          closeSidebarOnMobile();
+        },
+        openConstructionDashboard: () => {
+          setCurrentView('construction');
+          setSelectedProjectId(null);
+          setSidebarOption(null);
+          closeSidebarOnMobile();
+        },
         openCreateProject: () => {
           setSelectedProjectId(null);
           window.setTimeout(() => setShowAddModal(true), 120);
@@ -326,7 +362,14 @@ export default function App() {
 
   const handleSelectProject = (projectId: string | null) => {
     setSelectedProjectId(projectId);
+    setSidebarOption(null);
     closeSidebarOnMobile();
+  };
+
+  const handleSelectWorkspace = (type: 'construction' | 'rental') => {
+    setSelectedProjectId(null);
+    setSidebarOption(null);
+    setCurrentView(type);
   };
 
   const handleLaunchProject = async (e: React.FormEvent) => {
@@ -343,18 +386,18 @@ export default function App() {
       description: description || "No workspace details provided.",
       startDate: new Date().toISOString().split('T')[0],
       estimatedEndDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      budget: Number(budget) || 10000,
+      budget: currentView === 'construction' ? Math.max(0, Number(budget) || 0) : 0,
       currency: currency || 'DH',
       status: 'planning',
-      projectType: currentView === 'construction' ? 'construction' : 'service',
+      projectType: currentView === 'rental' ? 'rental' : 'construction',
       creatorEmail: ownerEmail,
       members: [
         { email: ownerEmail, name: user.displayName || 'Owner', role: 'owner', status: 'accepted' }
       ],
-      sections: [
+      sections: currentView === 'construction' ? [
         { id: `sec_p_${Date.now()}`, projectId: newId, title: language === 'en' ? "Painting & Plastering" : language === 'fr' ? "Peinture & Plâtrerie" : "دهان وجبس", progress: 0, status: 'planning' },
         { id: `sec_pl_${Date.now()}`, projectId: newId, title: language === 'en' ? "Bath & Plumbing Services" : language === 'fr' ? "Plomberie & Sanitaires" : "سباكة وصرف صحي", progress: 0, status: 'planning' }
-      ],
+      ] : [],
       expenses: [],
       tasks: [
         {
@@ -372,7 +415,16 @@ export default function App() {
         }
       ],
       photos: [],
-      documents: []
+      documents: [],
+      ...(currentView === 'rental' && {
+        rentalProperty: {
+          ownerName: clientName || "N/A",
+          buildingNumber: address || projName,
+          pricePerNight: Number(budget) || 0,
+          commissionRate: 10,
+        },
+        rentalBookings: [],
+      })
     };
 
     // Incorporate persistent updates
@@ -389,17 +441,46 @@ export default function App() {
     setClientName('');
     setAddress('');
     setDescription('');
-    setBudget(120000);
+    setBudget(0);
     setCurrency('DH');
     setShowAddModal(false);
   };
 
   const filteredPages = projects.filter(p => (p.projectType || 'construction') === currentView && p.name.toLowerCase().includes(sidebarFilter.toLowerCase()));
+  const unavailableWorkspaceSelected =
+    activeProject?.projectType === 'service';
+  const handleWorkspaceOptionClick = (optionId: string) => {
+    const nextOption = sidebarOption === optionId ? null : optionId;
+    setSidebarOption(nextOption);
 
-  return currentView === 'welcome' ? (
+    if (
+      currentView === 'construction' &&
+      nextOption &&
+      (nextOption === 'documents' || nextOption === 'gallery')
+    ) {
+      const target =
+        activeProject?.projectType === 'construction'
+          ? activeProject
+          : filteredPages[0];
+      if (target) {
+        setPendingAiNav({
+          projectId: target.id,
+          tab: nextOption === 'documents' ? 'docs' : 'gallery',
+        });
+        setSelectedProjectId(target.id);
+      }
+    }
+
+    closeSidebarOnMobile();
+  };
+
+  return currentView === 'welcome' || unavailableWorkspaceSelected ? (
     <WelcomePage
       language={language}
-      onSelectType={(type) => setCurrentView(type)}
+      onSelectType={handleSelectWorkspace}
+      theme={theme}
+      onThemeToggle={handleThemeToggle}
+      onLanguageChange={handleLanguageChange}
     />
   ) : (
     <div className={`flex min-h-screen text-slate-800 dark:text-slate-100 bg-slate-50/40 dark:bg-[#121212] transition-colors duration-350 font-sans ${theme === 'dark' ? 'dark' : ''}`}>
@@ -444,7 +525,6 @@ export default function App() {
                     <span className="mt-0.5 block truncate font-mono text-[9.5px] tracking-wide flex items-center gap-1">
                       {currentView === 'construction' && <><Building className="w-3 h-3 text-sky-500" /><span className="text-sky-500">{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}</span></>}
                       {currentView === 'rental' && <><KeyRound className="w-3 h-3 text-purple-500" /><span className="text-purple-500">{language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'إيجارات'}</span></>}
-                      {currentView === 'service' && <><Briefcase className="w-3 h-3 text-teal-500" /><span className="text-teal-500">{language === 'en' ? 'Services' : language === 'fr' ? 'Services' : 'خدمات'}</span></>}
                     </span>
                   </div>
                 </div>
@@ -462,7 +542,7 @@ export default function App() {
             {/* Quick Core Actions Menu */}
             <div className="px-3 py-3 border-b border-slate-100 dark:border-slate-900/40 space-y-1.5 font-sans">
               <button
-                onClick={() => { setSelectedProjectId(null); }}
+                onClick={() => { setSelectedProjectId(null); setSidebarOption(null); closeSidebarOnMobile(); }}
                 className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
                   selectedProjectId === null 
                     ? 'bg-slate-200/50 dark:bg-slate-850/80 text-sky-600 dark:text-sky-400' 
@@ -479,17 +559,51 @@ export default function App() {
                 className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-slate-600 dark:text-slate-350 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
               >
                 <Plus className="w-4 h-4 opacity-80 text-sky-500" />
-                <span>{sf.newWorkspace}</span>
+                <span>{
+                  currentView === 'construction'
+                    ? (language === 'en' ? 'New Project' : language === 'fr' ? 'Nouveau Projet' : 'مشروع جديد')
+                    : (language === 'en' ? 'New Property' : language === 'fr' ? 'Nouvelle Propriété' : 'عقار جديد')
+                }</span>
               </button>
 
               <button
-                onClick={() => setCurrentView('welcome')}
+                onClick={() => { setCurrentView('welcome'); setSidebarOption(null); }}
                 className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
               >
                 <span className="text-[10px] opacity-70">⌂</span>
                 <span>{language === 'en' ? 'Switch Workspace' : language === 'fr' ? 'Changer d\'espace' : 'تبديل مساحة العمل'}</span>
               </button>
             </div>
+
+            {/* Workspace-specific quick options */}
+            {(() => {
+              const options = WORKSPACE_OPTIONS[currentView];
+              if (!options || options.length === 0) return null;
+              return (
+                <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-900/40 space-y-0.5 font-sans">
+                  {options.map((opt) => {
+                    const Icon = opt.icon;
+                    const isActive = sidebarOption === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        onClick={() => handleWorkspaceOptionClick(opt.id)}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+                          isActive
+                            ? currentView === 'construction'
+                                ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400'
+                                : 'bg-purple-50 dark:bg-purple-950/30 text-purple-600 dark:text-purple-400'
+                            : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-850'
+                        }`}
+                      >
+                        <Icon className={`w-4 h-4 ${isActive ? 'opacity-100' : 'opacity-70'}`} />
+                        <span>{language === 'en' ? opt.labelEn : language === 'fr' ? opt.labelFr : opt.labelAr}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             {/* Sidebar Projects Filter Search */}
             <div className="px-3 pt-3">
@@ -614,6 +728,13 @@ export default function App() {
       {/* Main content — navbar lives inside each view, aligned with this column */}
       <main className="relative flex min-h-screen min-w-0 flex-1 flex-col overflow-x-hidden">
         <div className="flex-1">
+          <Suspense
+            fallback={
+              <AppLoader
+                label={language === 'en' ? 'Loading workspace' : language === 'fr' ? 'Chargement' : 'جار التحميل'}
+              />
+            }
+          >
           <AnimatePresence mode="wait">
             {currentView === 'rental' && !selectedProjectId ? (
               <motion.div
@@ -625,7 +746,15 @@ export default function App() {
                 className="transform-gpu"
               >
                 <RentalDashboard
-                  onSelectProject={(id) => handleSelectProject(id)}
+                  onSelectProject={(id, tab) => {
+                    if (tab) setPendingAiNav({ projectId: id, tab });
+                    handleSelectProject(id);
+                  }}
+                  onEditProject={(id) => {
+                    setPendingProjectSettingsId(id);
+                    handleSelectProject(id);
+                  }}
+                  section={sidebarOption === 'bookings' || sidebarOption === 'revenue' ? sidebarOption : 'portfolio'}
                   language={language}
                   onLanguageChange={handleLanguageChange}
                   theme={theme}
@@ -665,6 +794,8 @@ export default function App() {
                     setHighlightInvitationId(null);
                   }}
                   workspaceType={currentView === 'rental' ? undefined : currentView}
+                  onBack={() => { setCurrentView('welcome'); setSidebarOption(null); }}
+                  backLabel={language === 'en' ? 'All Workspaces' : language === 'fr' ? 'Tous les espaces' : 'جميع مساحات العمل'}
                 />
               </motion.div>
             ) : (
@@ -678,6 +809,8 @@ export default function App() {
               >
                 <ProjectDetail 
                   projectId={selectedProjectId}
+                  openSettingsOnLoad={pendingProjectSettingsId === selectedProjectId}
+                  onOpenSettingsConsumed={() => setPendingProjectSettingsId(null)}
                   onBack={() => handleSelectProject(null)}
                   onOpenCreateProject={() => {
                     handleSelectProject(null);
@@ -711,6 +844,7 @@ export default function App() {
               </motion.div>
             )}
           </AnimatePresence>
+          </Suspense>
         </div>
         <AppFooter language={language} />
       </main>
@@ -719,7 +853,7 @@ export default function App() {
       <AnimatePresence>
         {showAddModal && (
         <motion.div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px] max-sm:backdrop-blur-none"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/55 px-3 py-4 backdrop-blur-[2px] max-sm:backdrop-blur-none sm:items-center sm:px-4"
           id="sidebar-pj-creator-modal"
           onClick={() => setShowAddModal(false)}
           role="presentation"
@@ -735,7 +869,7 @@ export default function App() {
             animate="animate"
             exit="exit"
             transition={modal}
-            className="panel-motion-gpu w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 rounded-xl shadow-2xl p-5 text-left font-sans"
+            className="panel-motion-gpu max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 text-left font-sans shadow-2xl dark:border-slate-805 dark:bg-slate-900 sm:p-5"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -769,7 +903,7 @@ export default function App() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                     {sf.launchClient}
@@ -796,15 +930,17 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                     {sf.launchBudget}
                   </label>
                   <input
                     type="number"
-                    value={budget}
-                    onChange={(e) => setBudget(Number(e.target.value))}
+                    min={0}
+                    placeholder="0"
+                    value={budget || ''}
+                    onChange={(e) => setBudget(Math.max(0, Number(e.target.value) || 0))}
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-955 text-slate-900 dark:text-white focus:outline-none font-mono"
                   />
                 </div>
@@ -837,7 +973,7 @@ export default function App() {
                 />
               </div>
 
-              <div className="flex justify-end gap-2.5 pt-2">
+              <div className="grid grid-cols-2 gap-2.5 pt-2 sm:flex sm:justify-end">
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
@@ -882,22 +1018,30 @@ export default function App() {
       />
 
       <AIAssistantFab onClick={() => setShowAIAssistant(true)} language={language} />
-      <AIAssistantPanel
-        open={showAIAssistant}
-        onClose={() => setShowAIAssistant(false)}
-        projects={projects}
-        activeProject={activeProject}
-        language={language}
-        userEmail={user?.email ?? ''}
-        userName={user?.displayName || 'HS Tracker User'}
-        onApplyProject={handleAiApplyProject}
-        onSelectProject={setSelectedProjectId}
-        onNavigate={handleAiNavigate}
-        onApplyDocumentDraft={(draft, projectId) => {
-          setPendingAiDocumentDraft({ projectId, draft });
-          setSelectedProjectId(projectId);
-        }}
-      />
+      <Suspense fallback={null}>
+        <AIAssistantPanel
+          open={showAIAssistant}
+          onClose={() => setShowAIAssistant(false)}
+          projects={projects}
+          activeProject={activeProject}
+          language={language}
+          userEmail={user?.email ?? ''}
+          userName={user?.displayName || 'HS Tracker User'}
+          onApplyProject={handleAiApplyProject}
+          onSelectProject={(id) => {
+            const target = projects.find((item) => item.id === id);
+            if (target?.projectType === 'rental') setCurrentView('rental');
+            else if (target) setCurrentView('construction');
+            setSelectedProjectId(id);
+            setSidebarOption(null);
+          }}
+          onNavigate={handleAiNavigate}
+          onApplyDocumentDraft={(draft, projectId) => {
+            setPendingAiDocumentDraft({ projectId, draft });
+            setSelectedProjectId(projectId);
+          }}
+        />
+      </Suspense>
 
       <InstallAppPrompt language={language} />
 

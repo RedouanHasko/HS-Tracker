@@ -39,11 +39,9 @@ export interface AppFooterProps {
 export function AppFooter({ language, variant = 'default' }: AppFooterProps) {
   const lang = language ?? getLanguage();
   const copy = FOOTER_COPY[lang];
-  const isRtl = lang === 'ar';
 
   return (
     <footer
-      dir={isRtl ? 'rtl' : 'ltr'}
       className={`mt-auto shrink-0 border-t border-slate-200/80 bg-white/70 backdrop-blur-sm dark:border-slate-800/80 dark:bg-[#161616]/90 ${
         variant === 'compact' ? 'px-4 py-3' : 'px-4 py-4 sm:px-6 lg:px-8'
       }`}

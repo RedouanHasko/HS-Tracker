@@ -208,7 +208,7 @@ export default function ProfileModal({ isOpen, onClose, language }: ProfileModal
     <AnimatePresence>
       {isOpen && (
       <motion.div
-        className="fixed inset-0 z-[150] flex items-center justify-center p-4 font-sans max-h-screen overflow-y-auto"
+        className="fixed inset-0 z-[150] flex max-h-[100dvh] items-start justify-center overflow-y-auto p-3 font-sans sm:items-center sm:p-4"
         role="presentation"
         variants={overlayVariants}
         initial="initial"
@@ -229,7 +229,7 @@ export default function ProfileModal({ isOpen, onClose, language }: ProfileModal
           animate="animate"
           exit="exit"
           transition={modal}
-          className="panel-motion-gpu relative my-8 flex w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+          className="panel-motion-gpu relative flex max-h-[calc(100dvh-1.5rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:max-h-[calc(100dvh-2rem)]"
           id="user-profile-settings-modal"
           onClick={(e) => e.stopPropagation()}
           role="dialog"

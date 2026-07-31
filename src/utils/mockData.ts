@@ -36,6 +36,8 @@ export const TRANSLATIONS = {
     addTask: "Add Checklist Task",
     expenses: "Expenses",
     addExpense: "Add Expense",
+    commissionPercent: "Commission %",
+    invoicePrice: "Invoice Price",
     photos: "Photos & Gallery",
     addPhoto: "Upload Photo",
     documents: "Document Vault",
@@ -75,6 +77,9 @@ export const TRANSLATIONS = {
       workers: "Workers & Handymen",
       equipment: "Heavy/Light Equipment",
       transportation: "Transportation & Freight",
+      utilities: "Utilities",
+      cleaning: "Cleaning",
+      maintenance: "Maintenance",
       miscellaneous: "Miscellaneous Overhead"
     },
     projectTypes: {
@@ -155,6 +160,8 @@ export const TRANSLATIONS = {
     addTask: "Créer une Tâche",
     expenses: "Frais & Dépenses",
     addExpense: "Créer une Dépense",
+    commissionPercent: "Commission %",
+    invoicePrice: "Prix Facture",
     photos: "Galerie Photos & Suivi",
     addPhoto: "Ajouter une Photo",
     documents: "Coffre-fort Documents",
@@ -194,6 +201,9 @@ export const TRANSLATIONS = {
       workers: "Main d'œuvre & Artisans",
       equipment: "Outillage & Machines",
       transportation: "Logistique & Transport",
+      utilities: "Charges & services publics",
+      cleaning: "Ménage",
+      maintenance: "Maintenance",
       miscellaneous: "Autres Frais Divers"
     },
     projectTypes: {
@@ -274,6 +284,8 @@ export const TRANSLATIONS = {
     addTask: "إضافة مهمة جديدة",
     expenses: "التكاليف والمصاريف",
     addExpense: "إضافة مصروف",
+    commissionPercent: "نسبة العمولة",
+    invoicePrice: "سعر الفاتورة",
     photos: "معرض الصور والمتابعة",
     addPhoto: "تحميل صورة",
     documents: "خزنة المستندات",
@@ -313,6 +325,9 @@ export const TRANSLATIONS = {
       workers: "اليد العاملة والحرفيين",
       equipment: "الأدوات والآلات",
       transportation: "اللوجستيات والنقل",
+      utilities: "المرافق والفواتير",
+      cleaning: "التنظيف",
+      maintenance: "الصيانة",
       miscellaneous: "مصاريف أخرى متنوعة"
     },
     projectTypes: {

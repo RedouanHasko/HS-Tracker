@@ -69,7 +69,7 @@ export default function ConfirmDialog({
     <AnimatePresence>
       {open && (
         <motion.div
-          className="fixed inset-0 z-[160] flex items-center justify-center px-4"
+          className="fixed inset-0 z-[160] flex items-start justify-center overflow-y-auto px-3 py-4 sm:items-center sm:px-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="confirm-dialog-title"
@@ -92,7 +92,7 @@ export default function ConfirmDialog({
             animate="animate"
             exit="exit"
             transition={modal}
-            className="panel-motion-gpu relative w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+            className="panel-motion-gpu relative max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:p-5"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-3">
@@ -130,7 +130,7 @@ export default function ConfirmDialog({
               </button>
             </div>
 
-            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-4 dark:border-slate-800">
+            <div className={`mt-5 grid gap-2 border-t border-slate-100 pt-4 dark:border-slate-800 sm:flex sm:justify-end ${isAlert ? 'grid-cols-1' : 'grid-cols-2'}`}>
               {!isAlert && (
                 <button
                   type="button"
