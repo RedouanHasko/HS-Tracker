@@ -1,4 +1,5 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Home, 
@@ -18,6 +19,7 @@ import {
   TrendingUp,
   Calendar,
   Image,
+  ClipboardList,
 } from 'lucide-react';
 import { initializeDB, getLanguage, saveLanguage } from './utils/mockData';
 import { saveProjectToDB, subscribeToProjects, registerUserProfileIfNeeded } from './lib/db';
@@ -37,10 +39,12 @@ import AIAssistantFab from './components/AIAssistantFab';
 import { AppLoader } from './components/ui/AppLoader';
 import { executeAIUINavigationPlan, PendingAiNav, AIUIAction } from './utils/aiNavigation';
 import { AIDocumentDraft } from './utils/aiDocumentDraft';
+import { appDateKey, appDateKeyAfterDays } from './utils/dateTime';
 
 const Dashboard = lazy(() => import('./components/Dashboard'));
 const ProjectDetail = lazy(() => import('./components/ProjectDetail'));
 const RentalDashboard = lazy(() => import('./components/RentalDashboard'));
+const OperationsDirectory = lazy(() => import('./components/OperationsDirectory'));
 const AIAssistantPanel = lazy(() => import('./components/AIAssistantPanel'));
 
 const SIDEBAR_TRANSLATIONS = {
@@ -126,10 +130,14 @@ const SIDEBAR_TRANSLATIONS = {
 
 const WORKSPACE_OPTIONS = {
   construction: [
-    { id: 'documents', icon: FileText, labelEn: 'Documents', labelFr: 'Documents', labelAr: 'مستندات' },
+    { id: 'directory', icon: Users, labelEn: 'Directory & Search', labelFr: 'Contacts & Recherche', labelAr: 'جهات الاتصال والبحث' },
+    { id: 'operations', icon: ClipboardList, labelEn: 'Site Operations', labelFr: 'Opérations Chantier', labelAr: 'عمليات الورشة' },
+    { id: 'documents', icon: FileText, labelEn: 'Invoices & Vouchers', labelFr: 'Factures & Bons', labelAr: 'فواتير وإيصالات' },
     { id: 'gallery', icon: Image, labelEn: 'Gallery', labelFr: 'Galerie', labelAr: 'معرض' },
   ],
   rental: [
+    { id: 'directory', icon: Users, labelEn: 'Directory & Search', labelFr: 'Contacts & Recherche', labelAr: 'جهات الاتصال والبحث' },
+    { id: 'calendar', icon: Calendar, labelEn: 'Calendar', labelFr: 'Calendrier', labelAr: 'التقويم' },
     { id: 'bookings', icon: Calendar, labelEn: 'Bookings', labelFr: 'Réservations', labelAr: 'حجوزات' },
     { id: 'revenue', icon: TrendingUp, labelEn: 'Revenue', labelFr: 'Revenus', labelAr: 'إيرادات' },
   ],
@@ -343,6 +351,33 @@ export default function App() {
     localStorage.setItem("buildtrack_sidebar_open", String(sidebarOpen));
   }, [sidebarOpen]);
 
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    setShowNotifications(false);
+    setHighlightInvitationId(null);
+    setShowAIAssistant(false);
+  }, [sidebarOpen, setShowNotifications, setHighlightInvitationId]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const mobile = window.matchMedia('(max-width: 1023px)');
+    const previousOverflow = document.body.style.overflow;
+    const previousOverscroll = document.body.style.overscrollBehavior;
+
+    const updateScrollLock = () => {
+      document.body.style.overflow = mobile.matches ? 'hidden' : previousOverflow;
+      document.body.style.overscrollBehavior = mobile.matches ? 'none' : previousOverscroll;
+    };
+
+    updateScrollLock();
+    mobile.addEventListener('change', updateScrollLock);
+    return () => {
+      mobile.removeEventListener('change', updateScrollLock);
+      document.body.style.overflow = previousOverflow;
+      document.body.style.overscrollBehavior = previousOverscroll;
+    };
+  }, [sidebarOpen]);
+
   const handleLanguageChange = (lang: Language) => {
     setLanguage(lang);
     saveLanguage(lang);
@@ -380,12 +415,13 @@ export default function App() {
     const newId = `proj_${Date.now()}`;
     const newProject: Project = {
       id: newId,
+      storageVersion: 2,
       name: projName,
       clientName: clientName || "N/A",
       address: address || "N/A",
       description: description || "No workspace details provided.",
-      startDate: new Date().toISOString().split('T')[0],
-      estimatedEndDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      startDate: appDateKey(),
+      estimatedEndDate: appDateKeyAfterDays(90),
       budget: currentView === 'construction' ? Math.max(0, Number(budget) || 0) : 0,
       currency: currency || 'DH',
       status: 'planning',
@@ -406,7 +442,7 @@ export default function App() {
           description: "Inspect raw drawings and evaluate initial budget bounds with general partners.",
           assignedTo: ownerEmail,
           priority: "high",
-          deadline: new Date().toISOString().split('T')[0],
+          deadline: appDateKey(),
           status: "pending",
           subtasks: [
             { id: `sub_1_${Date.now()}`, title: "Confirm client specifications", isCompleted: false },
@@ -450,29 +486,68 @@ export default function App() {
   const unavailableWorkspaceSelected =
     activeProject?.projectType === 'service';
   const handleWorkspaceOptionClick = (optionId: string) => {
-    const nextOption = sidebarOption === optionId ? null : optionId;
-    setSidebarOption(nextOption);
+    if (optionId === 'directory') {
+      const nextOption = sidebarOption === optionId ? null : optionId;
+      setSidebarOption(nextOption);
+      if (nextOption) setSelectedProjectId(null);
+      closeSidebarOnMobile();
+      return;
+    }
 
     if (
       currentView === 'construction' &&
-      nextOption &&
-      (nextOption === 'documents' || nextOption === 'gallery')
+      (optionId === 'documents' || optionId === 'gallery' || optionId === 'operations')
     ) {
       const target =
         activeProject?.projectType === 'construction'
           ? activeProject
           : filteredPages[0];
-      if (target) {
-        setPendingAiNav({
-          projectId: target.id,
-          tab: nextOption === 'documents' ? 'docs' : 'gallery',
-        });
-        setSelectedProjectId(target.id);
+
+      if (!target) {
+        setSidebarOption(null);
+        setSelectedProjectId(null);
+        setShowAddModal(true);
+        closeSidebarOnMobile();
+        return;
       }
+
+      setSidebarOption(optionId);
+      setPendingAiNav({
+        projectId: target.id,
+        tab: optionId === 'documents' ? 'docs' : optionId === 'gallery' ? 'gallery' : 'operations',
+      });
+      setSelectedProjectId(target.id);
+      closeSidebarOnMobile();
+      return;
     }
 
+    const nextOption = sidebarOption === optionId ? null : optionId;
+    setSidebarOption(nextOption);
     closeSidebarOnMobile();
   };
+
+  const mobileSidebarBackdrop =
+    typeof document !== 'undefined'
+      ? createPortal(
+          <AnimatePresence>
+            {sidebarOpen && (
+              <motion.div
+                key="sidebar-scrim"
+                variants={overlayVariants}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                transition={overlay}
+                onClick={() => setSidebarOpen(false)}
+                className="fixed inset-0 bg-black/45 backdrop-blur-[1px] max-sm:backdrop-blur-none lg:hidden transform-gpu"
+                style={{ zIndex: 2147483646 }}
+                aria-hidden="true"
+              />
+            )}
+          </AnimatePresence>,
+          document.body
+        )
+      : null;
 
   return currentView === 'welcome' || unavailableWorkspaceSelected ? (
     <WelcomePage
@@ -486,32 +561,21 @@ export default function App() {
     <div className={`flex min-h-screen text-slate-800 dark:text-slate-100 bg-slate-50/40 dark:bg-[#121212] transition-colors duration-350 font-sans ${theme === 'dark' ? 'dark' : ''}`}>
       
       {/* Backdrop when sidebar is open on mobile / tablet */}
-      <AnimatePresence>
-        {sidebarOpen && (
-          <motion.div
-            key="sidebar-scrim"
-            variants={overlayVariants}
-            initial="initial"
-            animate="animate"
-            exit="exit"
-            transition={overlay}
-            onClick={() => setSidebarOpen(false)}
-            className="fixed inset-0 z-30 bg-black/40 backdrop-blur-[1px] max-sm:backdrop-blur-none lg:hidden transform-gpu"
-            aria-hidden="true"
-          />
-        )}
-      </AnimatePresence>
+      {mobileSidebarBackdrop}
 
       {/* Sidebar — slides in on mobile, collapses on desktop */}
       <aside 
-        className={`sidebar-motion panel-motion-gpu fixed inset-y-0 left-0 z-40 flex w-64 flex-col justify-between border-r border-slate-200 bg-[#f9f9f8] select-none dark:border-slate-850/70 dark:bg-[#161616] lg:relative lg:shrink-0 ${
+        className={`mobile-sidebar-drawer fixed inset-y-0 left-0 z-[2147483647] flex w-72 max-w-[calc(100vw-3rem)] flex-col justify-between border-r border-slate-200 bg-[#f9f9f8] pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] select-none shadow-2xl dark:border-slate-850/70 dark:bg-[#161616] lg:relative lg:z-40 lg:max-w-none lg:shrink-0 lg:py-0 lg:shadow-none ${
           sidebarOpen
-            ? 'translate-x-0 lg:w-64'
-            : '-translate-x-full lg:translate-x-0 lg:w-0 lg:overflow-hidden lg:border-r-0'
+            ? 'lg:w-64'
+            : 'lg:w-0 lg:overflow-hidden lg:border-r-0'
         }`}
+        data-open={sidebarOpen ? 'true' : 'false'}
+        style={{ zIndex: 2147483647 }}
         aria-hidden={!sidebarOpen}
+        aria-label={currentView === 'construction' ? 'Construction navigation' : 'Rental navigation'}
       >
-        <div className={`flex h-full w-64 flex-col justify-between transition-opacity duration-[280ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${sidebarOpen ? 'opacity-100' : 'pointer-events-none opacity-0 lg:invisible'}`}>
+        <div className={`flex h-full w-full flex-col justify-between lg:w-64 lg:transition-opacity lg:duration-[280ms] lg:ease-[cubic-bezier(0.22,1,0.36,1)] ${sidebarOpen ? 'lg:opacity-100' : 'pointer-events-none lg:invisible lg:opacity-0'}`}>
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between border-b border-slate-100 bg-slate-100/30 px-4 py-3.5 dark:border-slate-900 dark:bg-slate-950/20">
                 <div className="flex max-w-[80%] items-center gap-2 truncate">
@@ -726,7 +790,7 @@ export default function App() {
       </aside>
 
       {/* Main content — navbar lives inside each view, aligned with this column */}
-      <main className="relative flex min-h-screen min-w-0 flex-1 flex-col overflow-x-hidden">
+      <main className="relative z-0 flex min-h-screen min-w-0 flex-1 flex-col overflow-x-hidden">
         <div className="flex-1">
           <Suspense
             fallback={
@@ -736,7 +800,40 @@ export default function App() {
             }
           >
           <AnimatePresence mode="wait">
-            {currentView === 'rental' && !selectedProjectId ? (
+            {sidebarOption === 'directory' && !selectedProjectId ? (
+              <motion.div
+                key="operations-directory"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={page}
+                className="transform-gpu"
+              >
+                <OperationsDirectory
+                  projects={projects}
+                  language={language}
+                  onLanguageChange={handleLanguageChange}
+                  theme={theme}
+                  onThemeToggle={handleThemeToggle}
+                  onBack={() => setSidebarOption(null)}
+                  onOpenProject={(id) => {
+                    const target = projects.find((item) => item.id === id);
+                    if (target?.projectType === 'rental') setCurrentView('rental');
+                    else if (target) setCurrentView('construction');
+                    setSidebarOption(null);
+                    handleSelectProject(id);
+                  }}
+                  sidebarOpen={sidebarOpen}
+                  onToggleSidebar={toggleSidebar}
+                  sidebarToggleLabel={sidebarOpen ? sf.collapse : sf.expand}
+                  unreadCount={unreadCount}
+                  onToggleNotifications={() => {
+                    setShowNotifications((open) => !open);
+                    setHighlightInvitationId(null);
+                  }}
+                />
+              </motion.div>
+            ) : currentView === 'rental' && !selectedProjectId ? (
               <motion.div
                 key="rental-dashboard"
                 initial={{ opacity: 0, y: 6 }}
@@ -754,7 +851,7 @@ export default function App() {
                     setPendingProjectSettingsId(id);
                     handleSelectProject(id);
                   }}
-                  section={sidebarOption === 'bookings' || sidebarOption === 'revenue' ? sidebarOption : 'portfolio'}
+                  section={sidebarOption === 'calendar' || sidebarOption === 'bookings' || sidebarOption === 'revenue' ? sidebarOption : 'portfolio'}
                   language={language}
                   onLanguageChange={handleLanguageChange}
                   theme={theme}
@@ -997,7 +1094,8 @@ export default function App() {
       <ProfileModal 
         isOpen={showProfileModal} 
         onClose={() => setShowProfileModal(false)} 
-        language={language} 
+        language={language}
+        projects={projects}
       />
 
       <NotificationsPanel

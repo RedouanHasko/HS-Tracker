@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   X, 
@@ -11,20 +11,29 @@ import {
   LogOut, 
   Save, 
   CheckCircle2, 
-  AlertCircle
+  AlertCircle,
+  Download,
+  ShieldCheck,
+  Database
 } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
-import { getUserProfileFromDB, saveUserProfileToDB } from '../lib/db';
+import {
+  getUserProfileFromDB,
+  migrateProjectToVersionedStorage,
+  saveUserProfileToDB,
+} from '../lib/db';
 import { updateProfile } from 'firebase/auth';
 import { auth } from '../lib/firebase';
-import { Language, UserProfile } from '../types';
+import { Language, Project, UserProfile } from '../types';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useMotionConfig } from '../utils/motionPresets';
+import { downloadSystemBackup } from '../utils/systemBackup';
 
 interface ProfileModalProps {
   isOpen: boolean;
   onClose: () => void;
   language: Language;
+  projects: Project[];
 }
 
 const PROFILE_TRANSLATIONS = {
@@ -99,7 +108,7 @@ const PROFILE_TRANSLATIONS = {
   }
 };
 
-export default function ProfileModal({ isOpen, onClose, language }: ProfileModalProps) {
+export default function ProfileModal({ isOpen, onClose, language, projects }: ProfileModalProps) {
   const { user, signOut } = useAuth();
   const [profile, setProfile] = useState<UserProfile>({
     fullName: '',
@@ -113,8 +122,21 @@ export default function ProfileModal({ isOpen, onClose, language }: ProfileModal
   const [submitting, setSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [migrationArmed, setMigrationArmed] = useState(false);
+  const [migrationBusy, setMigrationBusy] = useState(false);
+  const [migrationStatus, setMigrationStatus] = useState('');
 
   const t = PROFILE_TRANSLATIONS[language] || PROFILE_TRANSLATIONS.en;
+  const ownedLegacyProjects = useMemo(() => {
+    const email = user?.email?.toLowerCase();
+    if (!email) return [];
+    return projects.filter(
+      (project) =>
+        project.storageVersion !== 2 &&
+        project.creatorEmail.toLowerCase() === email &&
+        project.projectType !== 'service'
+    );
+  }, [projects, user?.email]);
 
   useEscapeToClose(isOpen, onClose);
 
@@ -201,6 +223,54 @@ export default function ProfileModal({ isOpen, onClose, language }: ProfileModal
       await signOut();
     }
   };
+
+  const prepareMigration = () => {
+    downloadSystemBackup(projects, user?.email || undefined);
+    setMigrationStatus('');
+    setMigrationArmed(true);
+  };
+
+  const runMigration = async () => {
+    if (!migrationArmed || ownedLegacyProjects.length === 0) return;
+    setMigrationBusy(true);
+    setMigrationStatus('');
+    try {
+      for (const project of ownedLegacyProjects) {
+        await migrateProjectToVersionedStorage(project);
+      }
+      setMigrationStatus(
+        language === 'fr'
+          ? `${ownedLegacyProjects.length} espace(s) optimise(s) sans perte de donnees.`
+          : language === 'ar'
+            ? `تم تحسين ${ownedLegacyProjects.length} مساحة عمل بدون فقدان البيانات.`
+            : `${ownedLegacyProjects.length} workspace(s) optimized without data loss.`
+      );
+      setMigrationArmed(false);
+      window.dispatchEvent(new CustomEvent('buildtrack_db_update'));
+    } catch (error) {
+      setMigrationStatus(error instanceof Error ? error.message : 'Migration failed.');
+    } finally {
+      setMigrationBusy(false);
+    }
+  };
+
+  const backupCopy = language === 'fr'
+    ? {
+        title: 'Sauvegarde des donnees',
+        description: `Telecharger une copie versionnee de ${projects.length} espace(s) de travail sans modifier Firestore.`,
+        button: 'Telecharger la sauvegarde',
+      }
+    : language === 'ar'
+      ? {
+          title: 'نسخة احتياطية للبيانات',
+          description: `تنزيل نسخة مؤرخة من ${projects.length} مساحة عمل دون تغيير بيانات Firestore.`,
+          button: 'تنزيل النسخة الاحتياطية',
+        }
+      : {
+          title: 'Data backup',
+          description: `Download a versioned copy of ${projects.length} workspace(s) without changing Firestore.`,
+          button: 'Download backup',
+        };
 
   const { modal, modalVariants, overlayVariants, overlay } = useMotionConfig();
 
@@ -410,6 +480,81 @@ export default function ProfileModal({ isOpen, onClose, language }: ProfileModal
                 </div>
               </form>
             )}
+
+            <section className="border-t border-slate-100 pt-6 dark:border-slate-850">
+              <div className="flex flex-col gap-4 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 gap-3">
+                  <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <div>
+                    <h3 className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                      {backupCopy.title}
+                    </h3>
+                    <p className="mt-1 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
+                      {backupCopy.description}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => downloadSystemBackup(projects, user?.email || undefined)}
+                  disabled={projects.length === 0}
+                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg border border-emerald-600 bg-emerald-600 px-3 text-xs font-bold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  {backupCopy.button}
+                </button>
+              </div>
+              {ownedLegacyProjects.length > 0 && (
+                <div className="mt-3 rounded-xl border border-sky-500/20 bg-sky-500/5 p-4">
+                  <div className="flex items-start gap-3">
+                    <Database className="mt-0.5 h-5 w-5 shrink-0 text-sky-600 dark:text-sky-400" />
+                    <div className="min-w-0">
+                      <h3 className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                        {language === 'fr'
+                          ? 'Optimiser le stockage des espaces'
+                          : language === 'ar'
+                            ? 'تحسين تخزين مساحات العمل'
+                            : 'Optimize workspace storage'}
+                      </h3>
+                      <p className="mt-1 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
+                        {language === 'fr'
+                          ? `${ownedLegacyProjects.length} espace(s) vous appartenant utilisent encore l'ancien format. Une sauvegarde est requise avant la migration.`
+                          : language === 'ar'
+                            ? `${ownedLegacyProjects.length} مساحة عمل مملوكة لك ما زالت تستخدم التخزين القديم. يجب تنزيل نسخة احتياطية قبل الترحيل.`
+                            : `${ownedLegacyProjects.length} workspace(s) you own still use legacy storage. Download a backup before migration.`}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={prepareMigration}
+                      disabled={migrationBusy}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-xs font-bold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      {language === 'fr' ? 'Sauvegarder d’abord' : language === 'ar' ? 'نسخة احتياطية أولا' : 'Back up first'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={runMigration}
+                      disabled={!migrationArmed || migrationBusy}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-sky-600 px-3 text-xs font-bold text-white transition-colors hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Database className="h-3.5 w-3.5" />
+                      {migrationBusy
+                        ? (language === 'fr' ? 'Migration...' : language === 'ar' ? 'جار الترحيل...' : 'Migrating...')
+                        : (language === 'fr' ? 'Confirmer la migration' : language === 'ar' ? 'تأكيد الترحيل' : 'Confirm migration')}
+                    </button>
+                  </div>
+                  {migrationStatus && (
+                    <p className="mt-3 text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+                      {migrationStatus}
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
 
             {/* Structured Logout Center block */}
             <div className="mt-8 pt-6 border-t border-slate-100 dark:border-slate-850">

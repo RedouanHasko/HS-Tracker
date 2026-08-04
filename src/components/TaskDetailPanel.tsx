@@ -497,6 +497,32 @@ export default function TaskDetailPanel({
             </div>
           </div>
 
+          {/* Schedule controls */}
+          <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  {language === 'fr' ? 'Échéance de référence' : language === 'ar' ? 'الموعد الأساسي' : 'Baseline deadline'}
+                </label>
+                <input type="date" readOnly={!canEdit} value={task.baselineDeadline || ''} onChange={(e) => update({ baselineDeadline: e.target.value })} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950" />
+              </div>
+              <label className="flex h-10 items-center gap-2 self-end rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700">
+                <input type="checkbox" disabled={!canEdit} checked={Boolean(task.milestone)} onChange={(e) => update({ milestone: e.target.checked })} />
+                {language === 'fr' ? 'Jalon du projet' : language === 'ar' ? 'مرحلة رئيسية' : 'Project milestone'}
+              </label>
+            </div>
+            <div className="mt-3">
+              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                {language === 'fr' ? 'Raison du blocage' : language === 'ar' ? 'سبب التعطيل' : 'Blocker reason'}
+              </label>
+              <input readOnly={!canEdit} value={task.blockedReason || ''} onChange={(e) => update({ blockedReason: e.target.value })} placeholder={language === 'fr' ? 'Laisser vide si non bloqué' : language === 'ar' ? 'اتركه فارغاً إذا لم تكن المهمة معطلة' : 'Leave empty when the task is not blocked'} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950" />
+            </div>
+            {project.tasks.some((item) => item.id !== task.id) && <div className="mt-3">
+              <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">{language === 'fr' ? 'Dépend de' : language === 'ar' ? 'تعتمد على' : 'Depends on'}</p>
+              <div className="grid gap-2 sm:grid-cols-2">{project.tasks.filter((item) => item.id !== task.id).map((item) => <label key={item.id} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300"><input type="checkbox" disabled={!canEdit} checked={(task.dependencyIds || []).includes(item.id)} onChange={(e) => update({ dependencyIds: e.target.checked ? [...(task.dependencyIds || []), item.id] : (task.dependencyIds || []).filter((dependencyId) => dependencyId !== item.id) })} />{item.title}</label>)}</div>
+            </div>}
+          </div>
+
           {/* Notes */}
           <div>
             <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">{labels.notes}</label>

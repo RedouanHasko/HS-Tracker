@@ -58,6 +58,11 @@ export interface Task {
   afterImages?: TaskMedia[];
   progressImages?: TaskMedia[];
   attachments?: TaskAttachment[];
+  /** Scheduling controls used by roadmap variance and dependency reporting. */
+  dependencyIds?: string[];
+  milestone?: boolean;
+  blockedReason?: string;
+  baselineDeadline?: string;
 }
 
 export type TaskCostType = 'labor' | 'materials' | 'equipment' | 'other';
@@ -222,6 +227,59 @@ export interface RentalBooking {
   paymentOpeningBalance?: number;
   /** Individual guest installments. New payments are appended and never overwrite prior entries. */
   payments?: RentalBookingPayment[];
+  securityDeposit?: number;
+  channelFee?: number;
+  taxAmount?: number;
+  cancellationFee?: number;
+  refunds?: RentalRefund[];
+  operations?: RentalStayOperations;
+}
+
+export interface RentalRefund {
+  id: string;
+  date: string;
+  amount: number;
+  reason?: string;
+  method?: RentalPaymentMethod;
+  recordedAt: string;
+  recordedBy?: string;
+}
+
+export interface RentalStayOperations {
+  checkInStatus?: 'pending' | 'ready' | 'completed';
+  checkOutStatus?: 'pending' | 'completed';
+  cleaningStatus?: 'unassigned' | 'assigned' | 'in_progress' | 'completed';
+  assignedTo?: string;
+  keyHandoverNotes?: string;
+  checklist?: Array<{ id: string; title: string; completed: boolean }>;
+}
+
+export interface RentalCalendarBlock {
+  id: string;
+  type: 'tentative_hold' | 'maintenance';
+  startDate: string;
+  endDate: string;
+  title: string;
+  notes?: string;
+  status: 'active' | 'cancelled';
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface RentalOwnerStatement {
+  id: string;
+  month: string;
+  status: 'finalized' | 'cancelled';
+  openingBalance: number;
+  grossRevenue: number;
+  commission: number;
+  cleaning: number;
+  channelFees?: number;
+  expenses: number;
+  ownerPayments: number;
+  closingBalance: number;
+  finalizedAt: string;
+  finalizedBy: string;
 }
 
 export type RentalPaymentMethod = 'cash' | 'bank_transfer' | 'card' | 'online' | 'other';
@@ -247,6 +305,76 @@ export interface RentalOwnerPayment {
   legacySourceId?: string;
 }
 
+export type ContactKind = 'client' | 'owner' | 'guest' | 'supplier' | 'worker' | 'other';
+
+export interface ContactRecord {
+  id: string;
+  kind: ContactKind;
+  name: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  company?: string;
+  notes?: string;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+export interface ConstructionFundingEntry {
+  id: string;
+  date: string;
+  amount: number;
+  source: string;
+  method?: string;
+  reference?: string;
+  notes?: string;
+}
+
+export interface ConstructionChangeOrder {
+  id: string;
+  title: string;
+  description: string;
+  amountDelta: number;
+  daysDelta: number;
+  status: 'draft' | 'sent' | 'approved' | 'rejected' | 'cancelled';
+  requestedAt: string;
+  decidedAt?: string;
+  decisionNotes?: string;
+}
+
+export interface ConstructionPurchaseOrder {
+  id: string;
+  number: string;
+  supplier: string;
+  description: string;
+  amount: number;
+  issueDate: string;
+  expectedDate?: string;
+  status: 'draft' | 'ordered' | 'partially_received' | 'received' | 'cancelled';
+}
+
+export interface ConstructionSiteLog {
+  id: string;
+  date: string;
+  weather?: string;
+  workerCount: number;
+  notes: string;
+  photoIds?: string[];
+  createdBy: string;
+}
+
+export interface ConstructionBudgetCommitment {
+  id: string;
+  category: ExpenseCategory;
+  label: string;
+  committedAmount: number;
+  forecastAmount: number;
+  supplier?: string;
+  status: 'planned' | 'committed' | 'closed' | 'cancelled';
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -270,13 +398,45 @@ export interface Project {
   rentalProperty?: RentalProperty;
   rentalBookings?: RentalBooking[];
   rentalOwnerPayments?: RentalOwnerPayment[];
+  rentalCalendarBlocks?: RentalCalendarBlock[];
+  rentalOwnerStatements?: RentalOwnerStatement[];
+  contacts?: ContactRecord[];
+  constructionFunding?: ConstructionFundingEntry[];
+  constructionChangeOrders?: ConstructionChangeOrder[];
+  constructionPurchaseOrders?: ConstructionPurchaseOrder[];
+  constructionSiteLogs?: ConstructionSiteLog[];
+  constructionBudgetCommitments?: ConstructionBudgetCommitment[];
   /** Accepted members — used for Firestore queries and read access */
   memberEmails?: string[];
   /** Pending invitees — read + accept/decline only (not full member until accepted) */
   invitedEmails?: string[];
   /** Denormalized email → role map for Firestore security rules */
   memberRoleByEmail?: Record<string, UserRole>;
+  /** Version 2 stores growing project arrays as individual Firestore record documents. */
+  storageVersion?: 1 | 2;
+  /** Changes whenever versioned records are committed, allowing other clients to rehydrate. */
+  recordRevision?: string;
+  /** Lightweight diagnostics for versioned record collections. */
+  recordCounts?: Partial<Record<ProjectRecordKind, number>>;
 }
+
+export type ProjectRecordKind =
+  | 'section'
+  | 'expense'
+  | 'task'
+  | 'photo'
+  | 'document'
+  | 'reimbursement'
+  | 'rental_booking'
+  | 'rental_owner_payment'
+  | 'rental_calendar_block'
+  | 'rental_owner_statement'
+  | 'contact'
+  | 'construction_funding'
+  | 'construction_change_order'
+  | 'construction_purchase_order'
+  | 'construction_site_log'
+  | 'construction_budget_commitment';
 
 export interface Invitation {
   id: string;
@@ -419,3 +579,49 @@ export interface DocumentKindPreset {
 }
 
 export type DocumentPresetsMap = Record<DocumentKind, DocumentKindPreset>;
+
+export type CivilDocumentStatus = 'draft' | 'finalized' | 'paid' | 'cancelled';
+
+export interface CivilDocumentLineItem {
+  id: string;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  sourceExpenseId?: string;
+  baseAmount?: number;
+  commissionPercent?: number;
+}
+
+export interface CivilDocumentRecord {
+  id: string;
+  projectId: string;
+  kind: DocumentKind;
+  number: string;
+  status: CivilDocumentStatus;
+  version: number;
+  documentDate: string;
+  dueDate: string;
+  currency: string;
+  issuer: Pick<DocumentParty, 'name' | 'email' | 'phone' | 'address'>;
+  recipient: Pick<DocumentParty, 'name' | 'email' | 'phone' | 'address'> & {
+    kind: DocumentRecipientKind;
+  };
+  items: CivilDocumentLineItem[];
+  visibleColumns: DocumentLineColumn[];
+  taxRate: number;
+  notes: string;
+  subtotal: number;
+  total: number;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
+  lastExportedAt?: string;
+}
+
+export interface UserDocumentSettings {
+  parties: DocumentParty[];
+  presets: DocumentPresetsMap;
+  migratedFromLocalAt?: string;
+  updatedAt: string;
+}

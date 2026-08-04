@@ -37,6 +37,7 @@ import {
 import { buildActivityMemberEmails } from '../utils/activityHelpers';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useMotionConfig } from '../utils/motionPresets';
+import { appDateKey, appDateKeyAfterDays } from '../utils/dateTime';
 
 const PROJECTS_PER_PAGE = 11;
 
@@ -167,12 +168,13 @@ export default function Dashboard({
 
     const newProject: Project = {
       id: projectId,
+      storageVersion: 2,
       name: projName,
       clientName: clientName || t.dashboard,
       address: address || "N/A",
       description: description || "No description provided.",
-      startDate: startDate || new Date().toISOString().split('T')[0],
-      estimatedEndDate: endDate || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      startDate: startDate || appDateKey(),
+      estimatedEndDate: endDate || appDateKeyAfterDays(90),
       budget: defaultBudget,
       currency: currency || 'DH',
       status: 'planning',
@@ -190,7 +192,7 @@ export default function Dashboard({
           description: "Inspect raw drawings and evaluate initial budget bounds with general partners.",
           assignedTo: userEmail,
           priority: "high",
-          deadline: endDate || new Date().toISOString().split('T')[0],
+          deadline: endDate || appDateKey(),
           status: "pending",
           subtasks: [
             { id: `sub_1_${Date.now()}`, title: "Confirm client specifications", isCompleted: false },

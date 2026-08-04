@@ -71,6 +71,15 @@ export default defineConfig(() => {
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Pre-transform sidebar destinations so errors surface at startup instead of first click.
+      warmup: {
+        clientFiles: [
+          './src/App.tsx',
+          './src/components/OperationsDirectory.tsx',
+          './src/components/ProjectDetail.tsx',
+          './src/components/ConstructionOperationsCenter.tsx',
+        ],
+      },
     },
   };
 });

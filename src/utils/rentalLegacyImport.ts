@@ -1,4 +1,5 @@
 import { AppUser, Expense, Project, RentalBooking, RentalOwnerPayment } from '../types';
+import { appDateKey } from './dateTime';
 
 export interface LegacyRentalProject {
   legacyPropertyCode: string;
@@ -85,9 +86,15 @@ export function mergeLegacyRentalManifest(
       incoming.rentalBookings || [],
       (booking) => `${normalizedText(booking.clientName)}|${booking.checkIn}|${booking.checkOut}`
     );
+    const normalizedIncomingExpenses = (incoming.expenses || []).map((expense) => ({
+      ...expense,
+      paidBy: expense.paidBy || user.email.toLowerCase(),
+      createdBy: expense.createdBy || user.email.toLowerCase(),
+      createdByName: expense.createdByName || user.name || user.email.split('@')[0],
+    }));
     const expenseMerge = mergeUnique(
       current?.expenses || [],
-      incoming.expenses || [],
+      normalizedIncomingExpenses,
       (expense) => `${normalizedText(expense.title)}|${expense.date}|${expense.amount}`
     );
     const paymentMerge = mergeUnique(
@@ -112,9 +119,10 @@ export function mergeLegacyRentalManifest(
     }
 
     const email = user.email.toLowerCase();
-    const now = new Date().toISOString().slice(0, 10);
+    const now = appDateKey();
     projects.push({
       id: `legacy_rental_${code.toLowerCase()}`,
+      storageVersion: 2,
       name: incoming.name || `Rental ${incoming.legacyPropertyCode}`,
       clientName: incoming.rentalProperty.ownerName,
       address: incoming.address || '',

@@ -11,11 +11,37 @@ import {
   limit,
   deleteDoc,
   updateDoc,
-  onSnapshot
+  onSnapshot,
+  writeBatch,
+  deleteField,
+  runTransaction
 } from 'firebase/firestore';
-import { Project, TimelineActivity, UserProfile, AppNotification, Invitation } from '../types';
+import {
+  AppNotification,
+  CivilDocumentRecord,
+  ContactRecord,
+  DocumentKind,
+  DocumentParty,
+  DocumentPresetsMap,
+  Invitation,
+  Project,
+  TimelineActivity,
+  UserDocumentSettings,
+  UserProfile,
+} from '../types';
 import { buildProjectAccessFields, needsProjectAccessFieldSync } from '../utils/permissions';
 import { stripUndefinedForFirestore } from './firestoreSanitize';
+import {
+  hydrateVersionedProject,
+  collectProjectRecordStoragePaths,
+  PROJECT_RECORDS_COLLECTION,
+  PROJECT_TRASH_COLLECTION,
+  projectRecordFingerprint,
+  ProjectRecordDocument,
+  ProjectTrashDocument,
+  splitVersionedProject,
+} from '../utils/projectStorage';
+import { deleteStorageFileStrict } from './storage';
 
 export enum OperationType {
   CREATE = 'create',
@@ -25,6 +51,26 @@ export enum OperationType {
   GET = 'get',
   WRITE = 'write',
 }
+
+export const subscribeToContacts = (
+  userId: string,
+  callback: (contacts: ContactRecord[]) => void,
+) => onSnapshot(
+  query(collection(db, 'users', userId, 'contacts'), orderBy('updatedAt', 'desc'), limit(500)),
+  (snapshot) => callback(snapshot.docs.map((item) => item.data() as ContactRecord)),
+  (error) => logFirestoreError(error, OperationType.LIST, `users/${userId}/contacts`),
+);
+
+export const saveContactToDB = async (userId: string, contact: ContactRecord): Promise<void> => {
+  if (!auth.currentUser || auth.currentUser.uid !== userId) throw new Error('Sign in before saving contacts.');
+  if (!contact.id || !contact.name.trim()) throw new Error('A contact name is required.');
+  await setDoc(doc(db, 'users', userId, 'contacts', contact.id), stripUndefinedForFirestore(contact));
+};
+
+export const deleteContactFromDB = async (userId: string, contactId: string): Promise<void> => {
+  if (!auth.currentUser || auth.currentUser.uid !== userId) throw new Error('Sign in before deleting contacts.');
+  await deleteDoc(doc(db, 'users', userId, 'contacts', contactId));
+};
 
 export interface FirestoreErrorInfo {
   error: string;
@@ -191,6 +237,216 @@ function normalizeProjectForFirestore(project: Project): Project {
   };
 }
 
+const projectRecordCache = new Map<string, Map<string, ProjectRecordDocument>>();
+const hydratedProjectCache = new Map<string, { revision?: string; project: Project }>();
+
+async function loadProjectRecords(projectId: string): Promise<Map<string, ProjectRecordDocument>> {
+  const snapshot = await getDocs(collection(db, 'projects', projectId, PROJECT_RECORDS_COLLECTION));
+  const records = new Map(
+    snapshot.docs.map((recordDoc) => [recordDoc.id, recordDoc.data() as ProjectRecordDocument])
+  );
+  projectRecordCache.set(projectId, records);
+  return records;
+}
+
+async function hydrateProjectFromFirestore(project: Project): Promise<Project> {
+  if (project.storageVersion !== 2) return project;
+  const cached = hydratedProjectCache.get(project.id);
+  if (cached && cached.revision === project.recordRevision) return cached.project;
+
+  const records = await loadProjectRecords(project.id);
+  const hydrated = hydrateVersionedProject(project, Array.from(records.values()));
+  hydratedProjectCache.set(project.id, { revision: project.recordRevision, project: hydrated });
+  return hydrated;
+}
+
+async function saveVersionedProject(project: Project, authEmail: string): Promise<void> {
+  const normalized = normalizeProjectForFirestore(project);
+  const access = buildProjectAccessFields(normalized);
+  const { root, records } = splitVersionedProject(
+    { ...normalized, ...access },
+    authEmail
+  );
+  const previousRecords =
+    projectRecordCache.get(project.id) ||
+    (project.recordRevision ? await loadProjectRecords(project.id) : new Map<string, ProjectRecordDocument>());
+  const changedRecords = Array.from(records.entries()).filter(([recordId, record]) => {
+    const previous = previousRecords.get(recordId);
+    return !previous || projectRecordFingerprint(previous) !== projectRecordFingerprint(record);
+  });
+  const deletedRecordIds = Array.from(previousRecords.keys()).filter(
+    (recordId) => !records.has(recordId)
+  );
+  if (changedRecords.length === 0 && deletedRecordIds.length === 0 && project.recordRevision) {
+    root.recordRevision = project.recordRevision;
+  }
+  const writeCount = 1 + changedRecords.length + (deletedRecordIds.length * 2);
+  if (writeCount > 450) {
+    throw new Error(
+      `This update changes ${writeCount - 1} records at once. Split it into smaller updates before saving.`
+    );
+  }
+
+  const batch = writeBatch(db);
+  batch.set(
+    doc(db, 'projects', project.id),
+    stripUndefinedForFirestore(root),
+    { merge: true }
+  );
+  for (const [recordId, record] of changedRecords) {
+    batch.set(
+      doc(db, 'projects', project.id, PROJECT_RECORDS_COLLECTION, recordId),
+      stripUndefinedForFirestore(record)
+    );
+  }
+  for (const recordId of deletedRecordIds) {
+    const previous = previousRecords.get(recordId);
+    if (previous) {
+      batch.set(
+        doc(db, 'projects', project.id, PROJECT_TRASH_COLLECTION, recordId),
+        stripUndefinedForFirestore({
+          ...previous,
+          deletedAt: root.recordRevision,
+          deletedBy: authEmail,
+        })
+      );
+    }
+    batch.delete(doc(db, 'projects', project.id, PROJECT_RECORDS_COLLECTION, recordId));
+  }
+  await batch.commit();
+
+  projectRecordCache.set(project.id, records);
+  hydratedProjectCache.set(project.id, {
+    revision: root.recordRevision,
+    project: normalized,
+  });
+}
+
+const LEGACY_PROJECT_ARRAY_FIELDS = [
+  'sections',
+  'expenses',
+  'tasks',
+  'photos',
+  'documents',
+  'reimbursements',
+  'rentalBookings',
+  'rentalOwnerPayments',
+] as const;
+
+export const migrateProjectToVersionedStorage = async (project: Project): Promise<void> => {
+  const authEmail = auth.currentUser?.email?.toLowerCase();
+  if (!authEmail) throw new Error('Sign in before migrating a workspace.');
+  if (project.creatorEmail.toLowerCase() !== authEmail) {
+    throw new Error('Only the workspace owner can migrate its storage.');
+  }
+  if (project.storageVersion === 2) return;
+
+  const normalized = normalizeProjectForFirestore(project);
+  const access = buildProjectAccessFields(normalized);
+  const { root, records } = splitVersionedProject({ ...normalized, ...access }, authEmail);
+  if (records.size + 1 > 450) {
+    throw new Error(
+      `This workspace has ${records.size} records. Export it, then migrate it in smaller groups.`
+    );
+  }
+
+  const batch = writeBatch(db);
+  const rootUpdate: Record<string, unknown> = {
+    ...stripUndefinedForFirestore(root),
+  };
+  for (const field of LEGACY_PROJECT_ARRAY_FIELDS) rootUpdate[field] = deleteField();
+  batch.set(doc(db, 'projects', project.id), rootUpdate, { merge: true });
+  records.forEach((record, recordId) => {
+    batch.set(
+      doc(db, 'projects', project.id, PROJECT_RECORDS_COLLECTION, recordId),
+      stripUndefinedForFirestore(record)
+    );
+  });
+  await batch.commit();
+
+  projectRecordCache.set(project.id, records);
+  hydratedProjectCache.set(project.id, {
+    revision: root.recordRevision,
+    project: { ...normalized, storageVersion: 2, recordRevision: root.recordRevision, recordCounts: root.recordCounts },
+  });
+};
+
+export const loadProjectTrash = async (projectId: string): Promise<ProjectTrashDocument[]> => {
+  const snapshot = await getDocs(collection(db, 'projects', projectId, PROJECT_TRASH_COLLECTION));
+  return snapshot.docs
+    .map((trashDoc) => trashDoc.data() as ProjectTrashDocument)
+    .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
+};
+
+export const restoreProjectRecordFromTrash = async (
+  projectId: string,
+  recordId: string
+): Promise<void> => {
+  const authEmail = auth.currentUser?.email?.toLowerCase();
+  if (!authEmail) throw new Error('Sign in before restoring a record.');
+
+  const projectRef = doc(db, 'projects', projectId);
+  const trashRef = doc(db, 'projects', projectId, PROJECT_TRASH_COLLECTION, recordId);
+  const [projectSnapshot, trashSnapshot] = await Promise.all([
+    getDoc(projectRef),
+    getDoc(trashRef),
+  ]);
+  if (!projectSnapshot.exists() || projectSnapshot.data().storageVersion !== 2) {
+    throw new Error('This workspace is not available for record recovery.');
+  }
+  if (!trashSnapshot.exists()) throw new Error('This deleted record is no longer available.');
+
+  const trash = trashSnapshot.data() as ProjectTrashDocument;
+  const revision = new Date().toISOString();
+  const counts = {
+    ...(projectSnapshot.data().recordCounts || {}),
+    [trash.kind]: Number(projectSnapshot.data().recordCounts?.[trash.kind] || 0) + 1,
+  };
+  const restored: ProjectRecordDocument = {
+    projectId,
+    kind: trash.kind,
+    entityId: trash.entityId,
+    payload: trash.payload,
+    updatedAt: revision,
+    updatedBy: authEmail,
+  };
+
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'projects', projectId, PROJECT_RECORDS_COLLECTION, recordId), restored);
+  batch.delete(trashRef);
+  batch.update(projectRef, { recordRevision: revision, recordCounts: counts });
+  await batch.commit();
+  projectRecordCache.delete(projectId);
+  hydratedProjectCache.delete(projectId);
+};
+
+export const permanentlyDeleteProjectTrashRecord = async (
+  projectId: string,
+  recordId: string
+): Promise<void> => {
+  const trashRef = doc(db, 'projects', projectId, PROJECT_TRASH_COLLECTION, recordId);
+  const trashSnapshot = await getDoc(trashRef);
+  if (!trashSnapshot.exists()) return;
+  const trash = trashSnapshot.data() as ProjectTrashDocument;
+  const paths = collectProjectRecordStoragePaths(trash.payload);
+  const firestoreMediaIds = paths
+    .filter((path) => path.startsWith('firestore:project_task_media/'))
+    .map((path) => path.replace('firestore:project_task_media/', ''));
+  const externalPaths = paths.filter((path) => !path.startsWith('firestore:project_task_media/'));
+
+  await Promise.all(externalPaths.map(deleteStorageFileStrict));
+  if (firestoreMediaIds.length + 1 > 450) {
+    throw new Error('This record references too many media files for one cleanup operation.');
+  }
+
+  const batch = writeBatch(db);
+  firestoreMediaIds.forEach((mediaId) => {
+    batch.delete(doc(db, 'project_task_media', mediaId));
+  });
+  batch.delete(trashRef);
+  await batch.commit();
+};
+
 // Projects: Root dynamic collection
 export const saveProjectToDB = async (userId: string, project: Project) => {
   if (!project.id) return;
@@ -204,6 +460,10 @@ export const saveProjectToDB = async (userId: string, project: Project) => {
       ...project,
       creatorEmail: project.creatorEmail || authEmail,
     });
+    if (normalized.storageVersion === 2) {
+      await saveVersionedProject(normalized, authEmail);
+      return;
+    }
     const access = buildProjectAccessFields(normalized);
 
     const updatedProject = stripUndefinedForFirestore({
@@ -249,7 +509,7 @@ export const getProjectsFromDB = async (email: string): Promise<Project[]> => {
     p1.forEach(p => mergedMap.set(p.id, p));
     p2.forEach(p => mergedMap.set(p.id, p));
     
-    return Array.from(mergedMap.values());
+    return await Promise.all(Array.from(mergedMap.values()).map(hydrateProjectFromFirestore));
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, 'projects');
     return [];
@@ -270,23 +530,32 @@ export const subscribeToProjects = (email: string, callback: (projects: Project[
   let p1: Project[] = [];
   let p2: Project[] = [];
 
-  const handleUpdate = () => {
+  let updateGeneration = 0;
+  const handleUpdate = async () => {
+    const generation = ++updateGeneration;
     const mergedMap = new Map<string, Project>();
     p1.forEach(p => mergedMap.set(p.id, p));
     p2.forEach(p => mergedMap.set(p.id, p));
-    callback(Array.from(mergedMap.values()));
+    try {
+      const hydrated = await Promise.all(
+        Array.from(mergedMap.values()).map(hydrateProjectFromFirestore)
+      );
+      if (generation === updateGeneration) callback(hydrated);
+    } catch (error) {
+      logFirestoreError(error, OperationType.GET, 'projects/*/records');
+    }
   };
 
   const unsub1 = onSnapshot(q1, (snap) => {
     p1 = snap.docs.map(d => d.data() as Project);
-    handleUpdate();
+    void handleUpdate();
   }, (error) => {
     console.error("Projects subscriber error creatorEmail:", error);
   });
 
   const unsub2 = onSnapshot(q2, (snap) => {
     p2 = snap.docs.map(d => d.data() as Project);
-    handleUpdate();
+    void handleUpdate();
   }, (error) => {
     console.error("Projects subscriber error memberEmails:", error);
   });
@@ -301,7 +570,23 @@ export const deleteProjectFromDB = async (userId: string, projectId: string) => 
   if (!projectId) return;
   try {
     const projectRef = doc(db, 'projects', projectId);
-    await deleteDoc(projectRef);
+    const projectSnapshot = await getDoc(projectRef);
+    if (projectSnapshot.exists() && projectSnapshot.data().storageVersion === 2) {
+      const records = await loadProjectRecords(projectId);
+      if (records.size > 449) {
+        throw new Error('This project is too large for direct deletion. Archive it before cleanup.');
+      }
+      const batch = writeBatch(db);
+      records.forEach((_record, recordId) => {
+        batch.delete(doc(db, 'projects', projectId, PROJECT_RECORDS_COLLECTION, recordId));
+      });
+      batch.delete(projectRef);
+      await batch.commit();
+    } else {
+      await deleteDoc(projectRef);
+    }
+    projectRecordCache.delete(projectId);
+    hydratedProjectCache.delete(projectId);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `projects/${projectId}`);
   }
@@ -313,7 +598,7 @@ export const getProjectFromDB = async (userId: string, projectId: string): Promi
     const projectRef = doc(db, 'projects', projectId);
     const docSnap = await getDoc(projectRef);
     if (docSnap.exists()) {
-      return docSnap.data() as Project;
+      return await hydrateProjectFromFirestore(docSnap.data() as Project);
     }
     return null;
   } catch (error) {
@@ -330,13 +615,160 @@ export const subscribeToProject = (projectId: string, callback: (project: Projec
   const projectRef = doc(db, 'projects', projectId);
   return onSnapshot(projectRef, (snap) => {
     if (snap.exists()) {
-      callback(snap.data() as Project);
+      void hydrateProjectFromFirestore(snap.data() as Project)
+        .then(callback)
+        .catch((error) => logFirestoreError(error, OperationType.GET, `projects/${projectId}/records`));
     } else {
       callback(null);
     }
   }, (error) => {
     console.error(`Project subscriber error in projects/${projectId}:`, error);
   });
+};
+
+export type CivilDocumentDraft = Omit<
+  CivilDocumentRecord,
+  'id' | 'number' | 'version' | 'createdAt' | 'createdBy' | 'updatedAt' | 'updatedBy'
+> & { number?: string };
+
+const documentCounterId = (kind: DocumentKind, year: number) => `${kind}_${year}`;
+
+export const saveCivilDocumentToDB = async (
+  projectId: string,
+  draft: CivilDocumentDraft,
+  existingId?: string,
+): Promise<CivilDocumentRecord> => {
+  const userEmail = auth.currentUser?.email?.toLowerCase();
+  if (!userEmail) throw new Error('Sign in before saving a document.');
+  if (!projectId || draft.projectId !== projectId) throw new Error('Invalid document workspace.');
+  if (draft.items.length === 0) throw new Error('Add at least one document line before saving.');
+
+  return runTransaction(db, async (transaction) => {
+    const now = new Date().toISOString();
+    if (existingId) {
+      const recordRef = doc(db, 'projects', projectId, 'generated_documents', existingId);
+      const snapshot = await transaction.get(recordRef);
+      if (!snapshot.exists()) throw new Error('This saved document no longer exists.');
+      const previous = snapshot.data() as CivilDocumentRecord;
+      const updated: CivilDocumentRecord = {
+        ...draft,
+        id: previous.id,
+        number: previous.number,
+        version: previous.version + 1,
+        createdAt: previous.createdAt,
+        createdBy: previous.createdBy,
+        updatedAt: now,
+        updatedBy: userEmail,
+      };
+      transaction.set(recordRef, stripUndefinedForFirestore(updated));
+      return updated;
+    }
+
+    const year = Number(draft.documentDate.slice(0, 4)) || new Date().getFullYear();
+    const counterRef = doc(
+      db,
+      'projects',
+      projectId,
+      'document_counters',
+      documentCounterId(draft.kind, year),
+    );
+    const counterSnapshot = await transaction.get(counterRef);
+    const nextNumber = Number(counterSnapshot.data()?.nextNumber || 0) + 1;
+    const prefix = (draft.number?.split('-')[0] || draft.kind.slice(0, 3)).toUpperCase();
+    const number = `${prefix}-${year}-${String(nextNumber).padStart(4, '0')}`;
+    const id = `${draft.kind}_${year}_${String(nextNumber).padStart(6, '0')}`;
+    const record: CivilDocumentRecord = {
+      ...draft,
+      id,
+      number,
+      version: 1,
+      createdAt: now,
+      createdBy: userEmail,
+      updatedAt: now,
+      updatedBy: userEmail,
+    };
+    transaction.set(counterRef, {
+      projectId,
+      kind: draft.kind,
+      year,
+      nextNumber,
+      updatedAt: now,
+      updatedBy: userEmail,
+    });
+    transaction.set(
+      doc(db, 'projects', projectId, 'generated_documents', id),
+      stripUndefinedForFirestore(record),
+    );
+    return record;
+  });
+};
+
+export const subscribeToCivilDocuments = (
+  projectId: string,
+  callback: (documents: CivilDocumentRecord[]) => void,
+) => {
+  const documentsQuery = query(
+    collection(db, 'projects', projectId, 'generated_documents'),
+    orderBy('updatedAt', 'desc'),
+    limit(50),
+  );
+  return onSnapshot(
+    documentsQuery,
+    (snapshot) => callback(snapshot.docs.map((item) => item.data() as CivilDocumentRecord)),
+    (error) => logFirestoreError(error, OperationType.LIST, `projects/${projectId}/generated_documents`),
+  );
+};
+
+export const cancelCivilDocumentInDB = async (
+  projectId: string,
+  documentId: string,
+): Promise<void> => {
+  const userEmail = auth.currentUser?.email?.toLowerCase();
+  if (!userEmail) throw new Error('Sign in before cancelling a document.');
+  const recordRef = doc(db, 'projects', projectId, 'generated_documents', documentId);
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(recordRef);
+    if (!snapshot.exists()) throw new Error('This saved document no longer exists.');
+    const previous = snapshot.data() as CivilDocumentRecord;
+    if (previous.status === 'cancelled') return;
+    transaction.update(recordRef, {
+      status: 'cancelled',
+      version: previous.version + 1,
+      updatedAt: new Date().toISOString(),
+      updatedBy: userEmail,
+    });
+  });
+};
+
+export const loadUserDocumentSettingsFromDB = async (
+  userId: string,
+  localParties: DocumentParty[],
+  localPresets: DocumentPresetsMap,
+): Promise<UserDocumentSettings> => {
+  const settingsRef = doc(db, `users/${userId}/document_settings`, 'config');
+  const snapshot = await getDoc(settingsRef);
+  if (snapshot.exists()) return snapshot.data() as UserDocumentSettings;
+
+  const settings: UserDocumentSettings = {
+    parties: localParties,
+    presets: localPresets,
+    migratedFromLocalAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  await setDoc(settingsRef, stripUndefinedForFirestore(settings));
+  return settings;
+};
+
+export const saveUserDocumentSettingsToDB = async (
+  userId: string,
+  parties: DocumentParty[],
+  presets: DocumentPresetsMap,
+): Promise<void> => {
+  await setDoc(
+    doc(db, `users/${userId}/document_settings`, 'config'),
+    stripUndefinedForFirestore({ parties, presets, updatedAt: new Date().toISOString() }),
+    { merge: true },
+  );
 };
 
 // Invitations: Root collection

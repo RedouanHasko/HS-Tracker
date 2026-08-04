@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, User, signOut as firebaseSignOut } from 'firebase/auth';
-import { auth } from './firebase';
+import { auth, authReady } from './firebase';
 
 interface AuthContextType {
   user: User | null;
@@ -19,12 +19,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
-      setLoading(false);
-    });
+    let unsubscribe = () => {};
+    let active = true;
+    void authReady
+      .then(() => {
+        if (!active) return;
+        unsubscribe = onAuthStateChanged(auth, (user) => {
+          const isUnverifiedPasswordUser = !!user
+            && user.providerData.some((provider) => provider.providerId === 'password')
+            && !user.emailVerified;
+          setUser(isUnverifiedPasswordUser ? null : user);
+          setLoading(false);
+        });
+      })
+      .catch(() => {
+        if (active) setLoading(false);
+      });
 
-    return () => unsubscribe();
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
 
   const signOut = async () => {

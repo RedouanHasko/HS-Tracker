@@ -5,6 +5,7 @@ interface ImportMetaEnv {
   readonly VITE_GEMINI_API_KEY?: string;
   readonly VITE_GEMINI_MODEL?: string;
   readonly VITE_TASK_MEDIA_BACKEND?: 'firestore' | 'firebase';
+  readonly VITE_FIREBASE_APP_CHECK_SITE_KEY?: string;
 }
 
 interface ImportMeta {

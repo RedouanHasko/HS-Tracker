@@ -1,6 +1,6 @@
 import { Project } from '../types';
 
-export type ProjectTab = 'overview' | 'expenses' | 'tasks' | 'docs' | 'gallery' | 'rental';
+export type ProjectTab = 'overview' | 'expenses' | 'tasks' | 'docs' | 'gallery' | 'operations' | 'rental';
 
 export type AIUIActionType =
   | 'open_tab'
@@ -25,7 +25,7 @@ export interface AIUIAction {
     openTaskDetail?: boolean;
     projectId?: string;
     projectName?: string;
-    section?: 'portfolio' | 'bookings' | 'revenue';
+    section?: 'portfolio' | 'calendar' | 'bookings' | 'revenue';
   };
 }
 
@@ -42,10 +42,11 @@ const VALID_UI_TYPES = new Set<AIUIActionType>([
   'open_project_settings',
 ]);
 
-const VALID_TABS = new Set<ProjectTab>(['overview', 'expenses', 'tasks', 'docs', 'gallery', 'rental']);
+const VALID_TABS = new Set<ProjectTab>(['overview', 'expenses', 'tasks', 'docs', 'gallery', 'operations', 'rental']);
 
 function normalizeProjectTab(project: Project | null | undefined, tab: ProjectTab): ProjectTab {
   if (project?.projectType !== 'rental' && tab === 'rental') return 'overview';
+  if (project?.projectType !== 'construction' && tab === 'operations') return 'overview';
   return tab;
 }
 
@@ -145,7 +146,7 @@ export interface CompiledAiNavigation {
   openActivityHistory?: boolean;
   openTaskDetail?: boolean;
   openProjectSettings?: boolean;
-  rentalSection?: 'portfolio' | 'bookings' | 'revenue';
+  rentalSection?: 'portfolio' | 'calendar' | 'bookings' | 'revenue';
   openConstructionDashboard?: boolean;
 }
 
@@ -234,7 +235,7 @@ export interface AINavigationHandlers {
   openCreateProject?: () => void;
   /** Return to dashboard home (project list) */
   openDashboard?: () => void;
-  openRentalDashboard?: (section: 'portfolio' | 'bookings' | 'revenue') => void;
+  openRentalDashboard?: (section: 'portfolio' | 'calendar' | 'bookings' | 'revenue') => void;
   openConstructionDashboard?: () => void;
   /** Select a project workspace */
   onSelectProject?: (projectId: string) => void;

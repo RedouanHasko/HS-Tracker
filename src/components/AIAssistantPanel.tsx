@@ -50,7 +50,13 @@ import {
   GeminiModelId,
   formatGeminiError,
 } from '../lib/geminiClient';
-import { pushUndoSnapshot, popUndoSnapshot, undoStackSize } from '../utils/aiUndoStack';
+import {
+  applyAIUndoEntry,
+  loadUndoStack,
+  pushUndoSnapshot,
+  removeUndoEntry,
+  undoStackSize,
+} from '../utils/aiUndoStack';
 import { InlineLoader } from './ui/AppLoader';
 import AssistantMessage from './AssistantMessage';
 
@@ -295,7 +301,11 @@ export default function AIAssistantPanel({
     if (open) {
       refreshKeyState();
       const scopeKey = project?.id ?? 'workspace';
-      setUndoCount(project ? undoStackSize(project.id) : 0);
+      if (project) {
+        void undoStackSize(project.id, userEmail).then(setUndoCount);
+      } else {
+        setUndoCount(0);
+      }
       if (!hasGeminiApiKey()) {
         setShowKeyModal(true);
       }
@@ -505,9 +515,14 @@ export default function AIAssistantPanel({
         if (!target) continue;
 
         const ctx = buildApplyCtx(target);
-        pushUndoSnapshot(target);
         const { project: next, errors } = applyAIActions(target, actionsForProject, ctx);
-        await onApplyProject(next);
+        const undoEntry = await pushUndoSnapshot(target, next, userEmail);
+        try {
+          await onApplyProject(next);
+        } catch (error) {
+          if (undoEntry) await removeUndoEntry(undoEntry).catch(() => undefined);
+          throw error;
+        }
         lastAppliedProject = next;
         conversationProjectRef.current = next.id;
         onSelectProject?.(next.id);
@@ -540,7 +555,7 @@ export default function AIAssistantPanel({
           }));
         }
 
-        setUndoCount(undoStackSize(target.id));
+        setUndoCount(await undoStackSize(target.id, userEmail));
         if (errors.length > 0) notes.push(`${t.partial}\n${errors.join('\n')}`);
         else notes.push(t.applied);
       }
@@ -630,11 +645,13 @@ export default function AIAssistantPanel({
   const handleUndo = async () => {
     const undoProject = project ?? projects[0];
     if (!undoProject) return;
-    const prev = popUndoSnapshot(undoProject.id);
-    if (!prev) return;
-    await onApplyProject(prev);
-    setUndoCount(undoStackSize(undoProject.id));
-    onSelectProject?.(prev.id);
+    const [entry] = await loadUndoStack(undoProject.id, userEmail);
+    if (!entry) return;
+    const restored = applyAIUndoEntry(undoProject, entry);
+    await onApplyProject(restored);
+    await removeUndoEntry(entry);
+    setUndoCount(await undoStackSize(undoProject.id, userEmail));
+    onSelectProject?.(restored.id);
     setMessages((m) => [
       ...m,
       { id: `undo_${Date.now()}`, role: 'assistant', text: '↩ Undo applied — project restored to previous state.' },

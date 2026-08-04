@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion } from 'motion/react';
-import { Building, KeyRound, DollarSign, Calendar, TrendingUp, Plus, Users, ChevronRight, Phone, User as UserIcon, CheckCircle2, X, Trash2, Clock, Percent, Filter, LayoutGrid, Search, Table, BedDouble, AlertTriangle, Wrench, FileDown, Printer, ArrowUpRight, WalletCards, Upload, Pencil } from 'lucide-react';
+import { Building, KeyRound, DollarSign, Calendar, TrendingUp, Plus, Users, ChevronRight, Phone, User as UserIcon, CheckCircle2, X, Trash2, Clock, Percent, Filter, LayoutGrid, Search, Table, BedDouble, AlertTriangle, Wrench, FileDown, Printer, ArrowUpRight, WalletCards, Upload, Pencil, Download } from 'lucide-react';
 import TopNavbar from './TopNavbar';
 import ConfirmDialog from './ConfirmDialog';
-import { Project, Language, RentalBooking, RentalBookingStatus } from '../types';
+import { Project, Language, RentalBooking, RentalBookingStatus, RentalCalendarBlock } from '../types';
 import { TRANSLATIONS } from '../utils/mockData';
 import { useAuth } from '../lib/AuthContext';
 import { deleteProjectFromDB, saveProjectToDB, subscribeToProjects } from '../lib/db';
@@ -17,13 +17,16 @@ import {
   rentalBookingCommission,
 } from '../utils/rentalAccounting';
 import { LegacyRentalManifest, mergeLegacyRentalManifest, parseLegacyRentalManifest } from '../utils/rentalLegacyImport';
+import { parseRentalTabularFiles } from '../utils/rentalTabularImport';
 import { rentalText } from '../utils/rentalTranslations';
 import DatePickerInput from './ui/DatePickerInput';
+import { appDateKey as localDateKey } from '../utils/dateTime';
+import { downloadRentalCalendar } from '../utils/rentalCalendarExport';
 
 interface RentalDashboardProps {
   onSelectProject: (projectId: string, tab?: 'rental' | 'expenses' | 'tasks') => void;
   onEditProject: (projectId: string) => void;
-  section?: 'portfolio' | 'bookings' | 'revenue';
+  section?: 'portfolio' | 'calendar' | 'bookings' | 'revenue';
   language: Language;
   onLanguageChange: (lang: Language) => void;
   theme: 'light' | 'dark';
@@ -35,13 +38,6 @@ interface RentalDashboardProps {
   unreadCount?: number;
   onToggleNotifications?: () => void;
 }
-
-const localDateKey = (date = new Date()) => {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
 
 const currentMonthKey = () => localDateKey().slice(0, 7);
 
@@ -78,7 +74,7 @@ export default function RentalDashboard({
   const [rentalProjects, setRentalProjects] = useState<Project[]>([]);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [propertyQuery, setPropertyQuery] = useState('');
-  const [propertyOccupancy, setPropertyOccupancy] = useState<'all' | 'available' | 'reserved' | 'active'>('all');
+  const [propertyOccupancy, setPropertyOccupancy] = useState<'all' | 'available' | 'reserved' | 'active' | 'blocked'>('all');
   const [availabilityStart, setAvailabilityStart] = useState('');
   const [availabilityEnd, setAvailabilityEnd] = useState('');
   const [availabilityFilter, setAvailabilityFilter] = useState<'any' | 'available' | 'booked'>('any');
@@ -140,6 +136,10 @@ export default function RentalDashboard({
     const occupied = projectsInScope.filter((project) =>
       activeBookings(project).some((booking) => booking.checkIn <= today && booking.checkOut > today)
     ).length;
+    const unavailable = projectsInScope.filter((project) =>
+      activeBookings(project).some((booking) => booking.checkIn <= today && booking.checkOut > today)
+      || (project.rentalCalendarBlocks || []).some((block) => block.status === 'active' && block.startDate <= today && block.endDate > today)
+    ).length;
     const nextWeek = localDateKey(new Date(new Date(`${today}T12:00:00`).getTime() + 7 * 86400000));
     const arrivals = bookings.filter(({ booking }) => booking.checkIn >= today && booking.checkIn <= nextWeek);
     const monthRevenue = monthBookings.reduce((sum, { booking }) => {
@@ -161,15 +161,21 @@ export default function RentalDashboard({
       .filter((expense) => expense.date >= monthStart && expense.date < monthEnd)
       .filter(isOwnerExpense)
       .reduce((expenseSum, expense) => expenseSum + expense.amount, 0), 0);
+    const workflowReminders = bookings.filter(({ booking }) =>
+      (booking.checkIn >= today && booking.checkIn <= nextWeek && booking.operations?.checkInStatus !== 'ready' && booking.operations?.checkInStatus !== 'completed')
+      || (booking.checkOut === today && booking.operations?.checkOutStatus !== 'completed')
+      || (booking.checkOut <= today && booking.operations?.cleaningStatus && booking.operations.cleaningStatus !== 'completed')
+    ).length;
     return {
       total: projectsInScope.length,
-      available: Math.max(0, projectsInScope.length - occupied),
+      available: Math.max(0, projectsInScope.length - unavailable),
       occupied,
       arrivals,
       monthRevenue: Math.round(monthRevenue * 100) / 100,
       monthCommission: Math.round(monthCommission * 100) / 100,
       monthExpenses,
       outstanding,
+      workflowReminders,
     };
   }, [rentalProjects, propertyOwner, monthStart, monthEnd, today]);
   const stats = {
@@ -182,6 +188,7 @@ export default function RentalDashboard({
   const propertyOccupancyState = (project: Project) => {
     const bookings = activeBookings(project);
     if (bookings.some((booking) => booking.checkIn <= today && booking.checkOut > today)) return 'active' as const;
+    if ((project.rentalCalendarBlocks || []).some((block) => block.status === 'active' && block.startDate <= today && block.endDate > today)) return 'blocked' as const;
     if (bookings.some((booking) => booking.checkIn > today)) return 'reserved' as const;
     return 'available' as const;
   };
@@ -191,7 +198,10 @@ export default function RentalDashboard({
   const isAvailableForPeriod = (project: Project) => {
     if (!hasAvailabilityRange) return true;
     return !activeBookings(project)
-      .some((booking) => booking.checkIn < availabilityEnd && booking.checkOut > availabilityStart);
+      .some((booking) => booking.checkIn < availabilityEnd && booking.checkOut > availabilityStart)
+      && !(project.rentalCalendarBlocks || []).some((block) =>
+        block.status === 'active' && block.startDate < availabilityEnd && block.endDate > availabilityStart
+      );
   };
 
   const filteredRentalProjects = useMemo(() => {
@@ -265,32 +275,42 @@ export default function RentalDashboard({
         <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className={`mb-1 flex items-center gap-2 text-[10px] font-bold uppercase ${
-              section === 'bookings'
+              section === 'calendar'
+                ? 'text-violet-600 dark:text-violet-400'
+                : section === 'bookings'
                 ? 'text-sky-600 dark:text-sky-400'
                 : section === 'revenue'
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-teal-600 dark:text-teal-400'
             }`}>
-              {section === 'bookings'
+              {section === 'calendar'
+                ? <Calendar className="h-3.5 w-3.5" />
+                : section === 'bookings'
                 ? <Calendar className="h-3.5 w-3.5" />
                 : section === 'revenue'
                   ? <DollarSign className="h-3.5 w-3.5" />
                   : <KeyRound className="h-3.5 w-3.5" />}
-              {section === 'bookings'
+              {section === 'calendar'
+                ? rentalText(language, 'Portfolio calendar', 'Calendrier du portefeuille')
+                : section === 'bookings'
                 ? (rentalText(language, 'Booking center', 'Centre de reservations'))
                 : section === 'revenue'
                   ? (rentalText(language, 'Rental finances', 'Finances locatives'))
                   : (rentalText(language, 'Rental operations', 'Operations locatives'))}
             </div>
             <h1 className="text-2xl font-bold text-slate-950 dark:text-white">
-              {section === 'bookings'
+              {section === 'calendar'
+                ? rentalText(language, 'Availability calendar', 'Calendrier des disponibilites')
+                : section === 'bookings'
                 ? (rentalText(language, 'Bookings and stays', 'Reservations et sejours'))
                 : section === 'revenue'
                   ? (rentalText(language, 'Revenue and payouts', 'Revenus et versements'))
                   : (rentalText(language, 'Rental portfolio', 'Portefeuille de locations'))}
             </h1>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              {section === 'bookings'
+              {section === 'calendar'
+                ? rentalText(language, 'Bookings, tentative holds, and maintenance blocks across every apartment.', 'Reservations, options et maintenances pour tous les appartements.')
+                : section === 'bookings'
                 ? (rentalText(language, 'Every guest, arrival, departure, and balance in one working list.', 'Tous les clients, arrivees, departs et soldes dans une seule liste.'))
                 : section === 'revenue'
                   ? (rentalText(language, 'Revenue, commission, expenses, and owner payouts.', 'Revenus, commissions, depenses et versements aux proprietaires.'))
@@ -376,10 +396,14 @@ export default function RentalDashboard({
               <AlertTriangle className="h-4 w-4 text-amber-400" />
               <h2 className="text-xs font-bold">{rentalText(language, 'Needs attention', 'A surveiller')}</h2>
             </div>
-            <div className="mt-4 grid grid-cols-2 gap-4">
+            <div className="mt-4 grid grid-cols-3 gap-4">
               <div>
                 <p className="text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Guest balance', 'Solde clients')}</p>
                 <p className="mt-1 font-mono text-lg font-bold text-amber-600 dark:text-amber-300">{operationalStats.outstanding.toLocaleString()} DH</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Workflow reminders', 'Rappels opérations')}</p>
+                <p className="mt-1 font-mono text-lg font-bold text-sky-600 dark:text-sky-300">{operationalStats.workflowReminders}</p>
               </div>
               <div>
                 <p className="text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Month expenses', 'Depenses du mois')}</p>
@@ -395,6 +419,14 @@ export default function RentalDashboard({
 
         {section === 'bookings' && (
           <RentalBookingsCenter
+            projects={rentalProjects}
+            language={language}
+            onOpenProject={(projectId) => onSelectProject(projectId, 'rental')}
+          />
+        )}
+
+        {section === 'calendar' && (
+          <RentalUnifiedCalendar
             projects={rentalProjects}
             language={language}
             onOpenProject={(projectId) => onSelectProject(projectId, 'rental')}
@@ -498,6 +530,7 @@ export default function RentalDashboard({
                     <option value="available">{rentalText(language, 'Available', 'Disponible')}</option>
                     <option value="reserved">{rentalText(language, 'Reserved', 'Réservé')}</option>
                     <option value="active">{rentalText(language, 'Active', 'Occupé')}</option>
+                    <option value="blocked">{rentalText(language, 'Blocked', 'Bloqué')}</option>
                   </select>
                 </label>
                 <select
@@ -573,7 +606,7 @@ export default function RentalDashboard({
                       return <tr key={project.id} onClick={() => onSelectProject(project.id)} className="cursor-pointer transition-colors hover:bg-purple-50/60 dark:hover:bg-purple-950/20">
                         <td className="px-4 py-3"><div className="flex items-center gap-2"><Building className="h-4 w-4 text-purple-600" /><div><p className="font-semibold text-slate-900 dark:text-white">{project.rentalProperty?.buildingNumber || project.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{project.name}</p></div></div></td>
                         <td className="px-4 py-3 text-slate-600 dark:text-slate-300">{project.rentalProperty?.ownerName || '—'}</td>
-                        <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${occupancy === 'active' ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300' : occupancy === 'reserved' ? 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'}`}>{occupancy === 'active' ? (rentalText(language, 'Active', 'Occupé')) : occupancy === 'reserved' ? (rentalText(language, 'Reserved', 'Réservé')) : (rentalText(language, 'Available', 'Disponible'))}</span></td>
+                        <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${occupancy === 'active' ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300' : occupancy === 'reserved' ? 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300' : occupancy === 'blocked' ? 'bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'}`}>{occupancy === 'active' ? rentalText(language, 'Active', 'Occupé') : occupancy === 'reserved' ? rentalText(language, 'Reserved', 'Réservé') : occupancy === 'blocked' ? rentalText(language, 'Blocked', 'Bloqué') : rentalText(language, 'Available', 'Disponible')}</span></td>
                         <td className="px-4 py-3 text-right font-mono text-slate-700 dark:text-slate-200">{project.rentalProperty?.pricePerNight?.toLocaleString() || 0} {project.currency}</td>
                         <td className="px-4 py-3 text-right font-mono font-semibold text-slate-900 dark:text-white">{revenue.toLocaleString()} {project.currency}</td>
                         <td className="px-4 py-3">
@@ -633,7 +666,7 @@ export default function RentalDashboard({
                   const commission = bookings.reduce((sum, booking) => sum + rentalBookingCommission(booking, project), 0);
                   const nextBooking = nextBookingFor(project, today);
                   return <article key={project.id} className="rounded-lg border border-slate-200 bg-white p-4 text-left shadow-sm transition-all hover:border-purple-300 hover:shadow-md dark:border-slate-800 dark:bg-slate-900 dark:hover:border-purple-700">
-                    <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><Building className="h-4 w-4 shrink-0 text-purple-600" /><h3 className="truncate text-sm font-bold text-slate-900 dark:text-white">{project.rentalProperty?.buildingNumber || project.name}</h3></div><p className="mt-1 truncate text-[11px] text-slate-500">{project.rentalProperty?.ownerName || '—'}</p></div><span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${occupancy === 'active' ? 'bg-amber-100 text-amber-700' : occupancy === 'reserved' ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700'}`}>{occupancy}</span></div>
+                    <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><Building className="h-4 w-4 shrink-0 text-purple-600" /><h3 className="truncate text-sm font-bold text-slate-900 dark:text-white">{project.rentalProperty?.buildingNumber || project.name}</h3></div><p className="mt-1 truncate text-[11px] text-slate-500">{project.rentalProperty?.ownerName || '—'}</p></div><span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${occupancy === 'active' ? 'bg-amber-100 text-amber-700' : occupancy === 'reserved' ? 'bg-sky-100 text-sky-700' : occupancy === 'blocked' ? 'bg-violet-100 text-violet-700' : 'bg-emerald-100 text-emerald-700'}`}>{occupancy}</span></div>
                     <div className="mt-4 grid grid-cols-3 gap-2 border-t border-slate-100 pt-3 text-[10px] dark:border-slate-800"><div><span className="block text-slate-400">{rentalText(language, 'Night', 'Nuit')}</span><span className="font-mono font-bold text-slate-700 dark:text-slate-200">{project.rentalProperty?.pricePerNight || 0}</span></div><div><span className="block text-slate-400">{rentalText(language, 'Revenue', 'Revenus')}</span><span className="font-mono font-bold text-slate-700 dark:text-slate-200">{revenue.toLocaleString()}</span></div><div><span className="block text-slate-400">{rentalText(language, 'Bookings', 'Réservations')}</span><span className="font-mono font-bold text-slate-700 dark:text-slate-200">{bookings.length}</span></div></div>
                     <AvailabilityStrip project={project} startDate={today} language={language} />
                     <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
@@ -840,6 +873,205 @@ function RentalBookingsCenter({
   );
 }
 
+function RentalUnifiedCalendar({
+  projects,
+  language,
+  onOpenProject,
+}: {
+  projects: Project[];
+  language: Language;
+  onOpenProject: (projectId: string) => void;
+}) {
+  const { user } = useAuth();
+  const [month, setMonth] = useState(currentMonthKey);
+  const [showBlockForm, setShowBlockForm] = useState(false);
+  const [projectId, setProjectId] = useState('');
+  const [blockType, setBlockType] = useState<RentalCalendarBlock['type']>('tentative_hold');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [title, setTitle] = useState('');
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [cancelTarget, setCancelTarget] = useState<{ project: Project; block: RentalCalendarBlock } | null>(null);
+
+  const [year, monthNumber] = month.split('-').map(Number);
+  const numberOfDays = new Date(year, monthNumber, 0).getDate();
+  const dayKeys = Array.from({ length: numberOfDays }, (_, index) =>
+    `${month}-${String(index + 1).padStart(2, '0')}`
+  );
+  const canManage = (project: Project) => Boolean(
+    user?.email && !getProjectPermissions(resolveUserRole(project, user.email)).isReadOnly
+  );
+  const selectableProjects = projects.filter(canManage);
+
+  const openBlockForm = () => {
+    const firstProject = selectableProjects[0];
+    setProjectId(firstProject?.id || '');
+    setBlockType('tentative_hold');
+    setStartDate(`${month}-01`);
+    setEndDate(`${month}-${String(Math.min(2, numberOfDays)).padStart(2, '0')}`);
+    setTitle('');
+    setNotes('');
+    setError('');
+    setShowBlockForm(true);
+  };
+
+  const saveBlock = async () => {
+    if (!user?.uid || !user.email) return;
+    const project = projects.find((item) => item.id === projectId);
+    if (!project || !canManage(project)) return;
+    if (!title.trim() || !startDate || !endDate || endDate <= startDate) {
+      setError(rentalText(language, 'Add a title and a valid start/end period.', 'Ajoutez un titre et une periode valide.'));
+      return;
+    }
+    const bookingConflict = activeBookings(project).some((booking) =>
+      booking.checkIn < endDate && booking.checkOut > startDate
+    );
+    const blockConflict = (project.rentalCalendarBlocks || []).some((block) =>
+      block.status === 'active' && block.startDate < endDate && block.endDate > startDate
+    );
+    if (bookingConflict || blockConflict) {
+      setError(rentalText(language, 'This period overlaps an existing booking or block.', 'Cette periode chevauche une reservation ou un blocage.'));
+      return;
+    }
+    setSaving(true);
+    try {
+      const now = new Date().toISOString();
+      const block: RentalCalendarBlock = {
+        id: `calendar_block_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        type: blockType,
+        startDate,
+        endDate,
+        title: title.trim(),
+        notes: notes.trim() || undefined,
+        status: 'active',
+        createdAt: now,
+        createdBy: user.email.toLowerCase(),
+      };
+      await saveProjectToDB(user.uid, {
+        ...project,
+        rentalCalendarBlocks: [...(project.rentalCalendarBlocks || []), block],
+      });
+      setShowBlockForm(false);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Could not save this calendar block.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cancelBlock = async () => {
+    if (!user?.uid || !cancelTarget || !canManage(cancelTarget.project)) return;
+    setSaving(true);
+    try {
+      await saveProjectToDB(user.uid, {
+        ...cancelTarget.project,
+        rentalCalendarBlocks: (cancelTarget.project.rentalCalendarBlocks || []).map((block) =>
+          block.id === cancelTarget.block.id ? { ...block, status: 'cancelled' as const } : block
+        ),
+      });
+      setCancelTarget(null);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap items-center gap-2">
+          <DatePickerInput type="month" value={month} onChange={(value) => value && setMonth(value)} ariaLabel={rentalText(language, 'Calendar month', 'Mois du calendrier')} className="w-44" />
+          <div className="flex flex-wrap gap-3 text-[10px] font-semibold text-slate-500">
+            <span className="flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-sm bg-teal-500" />{rentalText(language, 'Booking', 'Reservation')}</span>
+            <span className="flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-sm bg-violet-500" />{rentalText(language, 'Tentative hold', 'Option')}</span>
+            <span className="flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-sm bg-amber-500" />{rentalText(language, 'Maintenance', 'Maintenance')}</span>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => downloadRentalCalendar(projects, `rentals-${month}.ics`)} className="flex h-9 items-center justify-center gap-1.5 rounded-md border border-slate-200 px-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:text-slate-200"><Download className="h-4 w-4" />ICS</button>
+        {selectableProjects.length > 0 && (
+          <button type="button" onClick={openBlockForm} className="flex h-9 items-center justify-center gap-1.5 rounded-md bg-violet-600 px-3 text-xs font-bold text-white hover:bg-violet-700">
+            <Plus className="h-4 w-4" />{rentalText(language, 'Add hold / block', 'Ajouter option / blocage')}
+          </button>
+        )}
+        </div>
+      </div>
+
+      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <table className="min-w-max border-collapse text-[10px]">
+          <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-950">
+            <tr>
+              <th className="sticky left-0 z-20 min-w-48 border-b border-r border-slate-200 bg-slate-50 px-3 py-2 text-left font-bold uppercase text-slate-500 dark:border-slate-800 dark:bg-slate-950">{rentalText(language, 'Apartment', 'Appartement')}</th>
+              {dayKeys.map((day) => {
+                const weekday = new Date(`${day}T12:00:00`).getDay();
+                return <th key={day} className={`h-11 w-9 min-w-9 border-b border-r border-slate-200 text-center font-mono dark:border-slate-800 ${weekday === 0 || weekday === 6 ? 'bg-slate-100 dark:bg-slate-900' : ''}`}><span className="block text-[8px] uppercase text-slate-400">{new Intl.DateTimeFormat(language === 'fr' ? 'fr' : 'en', { weekday: 'short' }).format(new Date(`${day}T12:00:00`)).slice(0, 2)}</span>{Number(day.slice(-2))}</th>;
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {projects.map((project) => (
+              <tr key={project.id}>
+                <th className="sticky left-0 z-10 border-b border-r border-slate-200 bg-white px-3 py-2 text-left dark:border-slate-800 dark:bg-slate-900">
+                  <button type="button" onClick={() => onOpenProject(project.id)} className="max-w-44 truncate font-bold text-slate-900 hover:text-teal-600 dark:text-white">{project.rentalProperty?.buildingNumber || project.name}</button>
+                  <span className="block max-w-44 truncate font-normal text-slate-400">{project.rentalProperty?.ownerName || project.name}</span>
+                </th>
+                {dayKeys.map((day) => {
+                  const booking = activeBookings(project).find((item) => item.checkIn <= day && item.checkOut > day);
+                  const block = (project.rentalCalendarBlocks || []).find((item) => item.status === 'active' && item.startDate <= day && item.endDate > day);
+                  const tone = booking ? 'bg-teal-500' : block?.type === 'maintenance' ? 'bg-amber-500' : block ? 'bg-violet-500' : 'bg-transparent';
+                  const label = booking ? `${booking.clientName}: ${booking.checkIn} - ${booking.checkOut}` : block ? `${block.title}: ${block.startDate} - ${block.endDate}` : rentalText(language, 'Available', 'Disponible');
+                  return (
+                    <td key={day} className="border-b border-r border-slate-100 p-0.5 dark:border-slate-800">
+                      <button
+                        type="button"
+                        title={label}
+                        aria-label={`${day}: ${label}`}
+                        onClick={() => booking ? onOpenProject(project.id) : block && canManage(project) ? setCancelTarget({ project, block }) : undefined}
+                        className={`h-8 w-8 rounded-sm ${tone} ${booking || block ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
+                      />
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {projects.length === 0 && <p className="p-10 text-center text-xs text-slate-400">{rentalText(language, 'Add a property to start the calendar.', 'Ajoutez un bien pour commencer.')}</p>}
+      </div>
+
+      {showBlockForm && (
+        <div className="fixed inset-0 z-[170] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && !saving && setShowBlockForm(false)}>
+          <div className="w-full max-w-lg rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-800"><div><h3 className="text-sm font-bold">{rentalText(language, 'Add calendar block', 'Ajouter un blocage')}</h3><p className="mt-0.5 text-[10px] text-slate-400">{rentalText(language, 'The selected apartment will be unavailable for this period.', 'Le bien sera indisponible pendant cette periode.')}</p></div><button type="button" onClick={() => setShowBlockForm(false)} className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"><X className="h-4 w-4" /></button></div>
+            <div className="grid gap-3 p-4 sm:grid-cols-2">
+              <label className="sm:col-span-2"><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Apartment', 'Appartement')}</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)} className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-xs dark:border-slate-700 dark:bg-slate-950">{selectableProjects.map((project) => <option key={project.id} value={project.id}>{project.rentalProperty?.buildingNumber || project.name} - {project.rentalProperty?.ownerName}</option>)}</select></label>
+              <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Type', 'Type')}</span><select value={blockType} onChange={(event) => setBlockType(event.target.value as RentalCalendarBlock['type'])} className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-xs dark:border-slate-700 dark:bg-slate-950"><option value="tentative_hold">{rentalText(language, 'Tentative hold', 'Option temporaire')}</option><option value="maintenance">{rentalText(language, 'Maintenance', 'Maintenance')}</option></select></label>
+              <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Title', 'Titre')}</span><input value={title} onChange={(event) => setTitle(event.target.value)} className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-xs dark:border-slate-700 dark:bg-slate-950" placeholder={blockType === 'maintenance' ? 'Plumbing repair' : 'Guest decision pending'} /></label>
+              <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Start', 'Debut')}</span><DatePickerInput value={startDate} onChange={setStartDate} ariaLabel="Block start" /></label>
+              <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'End', 'Fin')}</span><DatePickerInput value={endDate} min={startDate || undefined} onChange={setEndDate} ariaLabel="Block end" /></label>
+              <label className="sm:col-span-2"><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Notes', 'Notes')}</span><textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} className="w-full resize-none rounded-md border border-slate-200 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950" /></label>
+              {error && <p className="sm:col-span-2 rounded-md bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">{error}</p>}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-slate-200 px-4 py-3 dark:border-slate-800"><button type="button" disabled={saving} onClick={() => setShowBlockForm(false)} className="h-9 rounded-md border border-slate-200 px-3 text-xs font-bold dark:border-slate-700">{rentalText(language, 'Cancel', 'Annuler')}</button><button type="button" disabled={saving} onClick={saveBlock} className="h-9 rounded-md bg-violet-600 px-4 text-xs font-bold text-white disabled:opacity-50">{saving ? '...' : rentalText(language, 'Save block', 'Enregistrer')}</button></div>
+          </div>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={Boolean(cancelTarget)}
+        title={rentalText(language, 'Cancel this calendar block?', 'Annuler ce blocage ?')}
+        message={cancelTarget ? `${cancelTarget.block.title}: ${cancelTarget.block.startDate} - ${cancelTarget.block.endDate}` : ''}
+        confirmLabel={rentalText(language, 'Cancel block', 'Annuler le blocage')}
+        language={language}
+        loading={saving}
+        onConfirm={cancelBlock}
+        onCancel={() => !saving && setCancelTarget(null)}
+      />
+    </section>
+  );
+}
+
 function RentalRevenueCenter({
   projects,
   language,
@@ -956,7 +1188,8 @@ function AvailabilityStrip({ project, startDate, language }: { project: Project;
     date.setDate(date.getDate() + index);
     const key = localDateKey(date);
     const booking = activeBookings(project).find((item) => item.checkIn <= key && item.checkOut > key);
-    return { key, booking };
+    const block = (project.rentalCalendarBlocks || []).find((item) => item.status === 'active' && item.startDate <= key && item.endDate > key);
+    return { key, booking, block };
   });
   return (
     <div className="mt-3">
@@ -965,11 +1198,11 @@ function AvailabilityStrip({ project, startDate, language }: { project: Project;
         <span>{rentalText(language, 'Free / occupied', 'Libre / occupe')}</span>
       </div>
       <div className="grid grid-cols-14 gap-0.5" aria-label={rentalText(language, '14-day availability', 'Disponibilite sur 14 jours')}>
-        {days.map(({ key, booking }) => (
+        {days.map(({ key, booking, block }) => (
           <span
             key={key}
-            title={`${key}: ${booking ? booking.clientName : (rentalText(language, 'Free', 'Libre'))}`}
-            className={`h-2 rounded-sm ${booking ? 'bg-amber-400 dark:bg-amber-500' : 'bg-emerald-300 dark:bg-emerald-600'}`}
+            title={`${key}: ${booking ? booking.clientName : block ? block.title : rentalText(language, 'Free', 'Libre')}`}
+            className={`h-2 rounded-sm ${booking ? 'bg-amber-400 dark:bg-amber-500' : block ? 'bg-violet-400 dark:bg-violet-500' : 'bg-emerald-300 dark:bg-emerald-600'}`}
           />
         ))}
       </div>
@@ -979,16 +1212,20 @@ function AvailabilityStrip({ project, startDate, language }: { project: Project;
 
 type OwnerReportLine = {
   project: Project;
-  bookings: Array<{ booking: RentalBooking; nights: number; amount: number; commission: number; cleaning: number; commissionRate: number }>;
+  bookings: Array<{ booking: RentalBooking; nights: number; amount: number; commission: number; cleaning: number; channelFee: number; commissionRate: number }>;
   expenses: Project['expenses'];
   services: Project['tasks'];
   payments: NonNullable<Project['rentalOwnerPayments']>;
   revenue: number;
   commission: number;
   cleaningTotal: number;
+  channelFeeTotal: number;
   expenseTotal: number;
   paidTotal: number;
   ownerPayout: number;
+  openingBalance: number;
+  closingBalance: number;
+  finalized: boolean;
 };
 
 function OwnerReportModal({
@@ -1010,6 +1247,10 @@ function OwnerReportModal({
   language: Language;
   onClose: () => void;
 }) {
+  const { user } = useAuth();
+  const [finalizing, setFinalizing] = useState(false);
+  const [confirmFinalize, setConfirmFinalize] = useState(false);
+  const [finalizeError, setFinalizeError] = useState('');
   const monthStart = `${month}-01`;
   const endDate = new Date(`${monthStart}T12:00:00`);
   endDate.setMonth(endDate.getMonth() + 1);
@@ -1031,19 +1272,90 @@ function OwnerReportModal({
     const revenue = bookings.reduce((sum, item) => sum + item.amount, 0);
     const commission = bookings.reduce((sum, item) => sum + item.commission, 0);
     const cleaningTotal = bookings.reduce((sum, item) => sum + item.cleaning, 0);
+    const channelFeeTotal = bookings.reduce((sum, item) => sum + item.channelFee, 0);
     const expenseTotal = expenses.reduce((sum, expense) => sum + expense.amount, 0);
     const paidTotal = payments.reduce((sum, payment) => sum + payment.amount, 0);
-    return { project, bookings, expenses, services, payments, revenue, commission, cleaningTotal, expenseTotal, paidTotal, ownerPayout: revenue - commission - cleaningTotal - expenseTotal - paidTotal };
+    const existingStatement = (project.rentalOwnerStatements || []).find((statement) => statement.month === month && statement.status === 'finalized');
+    const previousStatement = (project.rentalOwnerStatements || [])
+      .filter((statement) => statement.status === 'finalized' && statement.month < month)
+      .sort((left, right) => right.month.localeCompare(left.month))[0];
+    const openingBalance = existingStatement?.openingBalance ?? previousStatement?.closingBalance ?? 0;
+    const currentPayout = revenue - commission - cleaningTotal - channelFeeTotal - expenseTotal - paidTotal;
+    return {
+      project,
+      bookings,
+      expenses,
+      services,
+      payments,
+      revenue: existingStatement?.grossRevenue ?? revenue,
+      commission: existingStatement?.commission ?? commission,
+      cleaningTotal: existingStatement?.cleaning ?? cleaningTotal,
+      channelFeeTotal: existingStatement ? (existingStatement.channelFees ?? 0) : channelFeeTotal,
+      expenseTotal: existingStatement?.expenses ?? expenseTotal,
+      paidTotal: existingStatement?.ownerPayments ?? paidTotal,
+      ownerPayout: existingStatement ? existingStatement.closingBalance - existingStatement.openingBalance : currentPayout,
+      openingBalance,
+      closingBalance: existingStatement?.closingBalance ?? openingBalance + currentPayout,
+      finalized: Boolean(existingStatement),
+    };
   });
   const totals = lines.reduce((result, line) => ({
     nights: result.nights + line.bookings.reduce((sum, item) => sum + item.nights, 0),
     revenue: result.revenue + line.revenue,
     commission: result.commission + line.commission,
     cleaning: result.cleaning + line.cleaningTotal,
+    channelFees: result.channelFees + line.channelFeeTotal,
     expenses: result.expenses + line.expenseTotal,
     paid: result.paid + line.paidTotal,
     payout: result.payout + line.ownerPayout,
-  }), { nights: 0, revenue: 0, commission: 0, cleaning: 0, expenses: 0, paid: 0, payout: 0 });
+    opening: result.opening + line.openingBalance,
+    closing: result.closing + line.closingBalance,
+  }), { nights: 0, revenue: 0, commission: 0, cleaning: 0, channelFees: 0, expenses: 0, paid: 0, payout: 0, opening: 0, closing: 0 });
+
+  const canFinalize = Boolean(
+    user?.uid
+    && user.email
+    && selectedOwner !== 'all'
+    && lines.length > 0
+    && lines.every((line) => getProjectPermissions(resolveUserRole(line.project, user.email!)).canModifySettings)
+  );
+  const allFinalized = lines.length > 0 && lines.every((line) => line.finalized);
+
+  const finalizeStatements = async () => {
+    if (!user?.uid || !user.email || !canFinalize || allFinalized) return;
+    setFinalizing(true);
+    setFinalizeError('');
+    try {
+      const now = new Date().toISOString();
+      for (const line of lines.filter((item) => !item.finalized)) {
+        await saveProjectToDB(user.uid, {
+          ...line.project,
+          rentalOwnerStatements: [
+            ...(line.project.rentalOwnerStatements || []),
+            {
+              id: `owner_statement_${month}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              month,
+              status: 'finalized',
+              openingBalance: line.openingBalance,
+              grossRevenue: line.revenue,
+              commission: line.commission,
+              cleaning: line.cleaningTotal,
+              channelFees: line.channelFeeTotal,
+              expenses: line.expenseTotal,
+              ownerPayments: line.paidTotal,
+              closingBalance: line.closingBalance,
+              finalizedAt: now,
+              finalizedBy: user.email.toLowerCase(),
+            },
+          ],
+        });
+      }
+    } catch (reason) {
+      setFinalizeError(reason instanceof Error ? reason.message : 'Could not finalize this statement.');
+    } finally {
+      setFinalizing(false);
+    }
+  };
 
   const escapeCsv = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
   const downloadCsv = () => {
@@ -1079,6 +1391,7 @@ function OwnerReportModal({
   };
 
   return (
+    <>
     <div className="fixed inset-0 z-[80] flex items-start justify-center overflow-y-auto bg-slate-950/70 p-2 backdrop-blur-sm sm:p-6">
       <div className="my-auto flex max-h-[calc(100dvh-1rem)] w-full max-w-6xl flex-col overflow-hidden rounded-lg bg-slate-100 shadow-2xl dark:bg-slate-950 sm:max-h-[calc(100dvh-3rem)]">
         <div className="no-print flex flex-col gap-3 border-b border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900 sm:flex-row sm:items-center sm:justify-between">
@@ -1093,11 +1406,13 @@ function OwnerReportModal({
             </select>
             <DatePickerInput type="month" value={month} onChange={(value) => value && onMonthChange(value)} ariaLabel={rentalText(language, 'Report month', 'Mois du rapport')} className="col-span-2 w-full sm:col-span-1 sm:w-44" />
             <button type="button" onClick={downloadCsv} className="flex h-9 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-white"><FileDown className="h-4 w-4" />CSV</button>
+            <button type="button" disabled={!canFinalize || allFinalized || finalizing} onClick={() => setConfirmFinalize(true)} className="col-span-2 flex h-9 items-center justify-center gap-1.5 rounded-md border border-emerald-300 bg-emerald-50 px-3 text-xs font-bold text-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300 sm:col-span-1"><CheckCircle2 className="h-4 w-4" />{allFinalized ? rentalText(language, 'Finalized', 'Finalise') : finalizing ? '...' : rentalText(language, 'Finalize', 'Finaliser')}</button>
             <button type="button" onClick={() => saveCivilDocumentAsPdf(`owner-report-${selectedOwner}-${month}`, 'report')} className="flex h-9 items-center gap-1.5 rounded-md bg-teal-600 px-3 text-xs font-bold text-white hover:bg-teal-700"><Printer className="h-4 w-4" />PDF</button>
             <button type="button" onClick={onClose} title={rentalText(language, 'Close', 'Fermer')} className="flex h-9 w-9 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800"><X className="h-4 w-4" /></button>
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-2 sm:p-5">
+          {finalizeError && <p className="no-print mx-auto mb-3 max-w-[190mm] rounded-md bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">{finalizeError}</p>}
           <article id="printable-civil-bill" className="print-page-a4 mx-auto min-h-[277mm] min-w-[46rem] max-w-[190mm] bg-white p-8 text-slate-900 shadow-sm print:min-w-0">
             <header className="flex items-start justify-between border-b-2 border-slate-900 pb-5">
               <div>
@@ -1107,20 +1422,22 @@ function OwnerReportModal({
               </div>
               <div className="text-right"><p className="font-mono text-sm font-bold">{month}</p><p className="mt-1 text-[10px] text-slate-400">{reportProjects.length} {rentalText(language, 'properties', 'biens')}</p></div>
             </header>
-            <div className="my-5 grid grid-cols-6 divide-x divide-slate-200 border-y border-slate-200 py-3">
+            <div className="my-5 grid grid-cols-8 divide-x divide-slate-200 border-y border-slate-200 py-3">
+              <ReportMetric label={rentalText(language, 'Opening', 'Ouverture')} value={`${totals.opening.toLocaleString()} DH`} />
               <ReportMetric label={rentalText(language, 'Nights', 'Nuits')} value={String(totals.nights)} />
               <ReportMetric label={rentalText(language, 'Revenue', 'Revenus')} value={`${totals.revenue.toLocaleString()} DH`} />
               <ReportMetric label="Commission" value={`${totals.commission.toLocaleString()} DH`} />
-              <ReportMetric label={rentalText(language, 'Costs', 'Frais')} value={`${(totals.cleaning + totals.expenses).toLocaleString()} DH`} />
+              <ReportMetric label={rentalText(language, 'Costs', 'Frais')} value={`${(totals.cleaning + totals.channelFees + totals.expenses).toLocaleString()} DH`} />
               <ReportMetric label={rentalText(language, 'Paid', 'Deja verse')} value={`${totals.paid.toLocaleString()} DH`} />
               <ReportMetric label={rentalText(language, 'Remaining', 'Reste a verser')} value={`${totals.payout.toLocaleString()} DH`} strong />
+              <ReportMetric label={rentalText(language, 'Closing', 'Cloture')} value={`${totals.closing.toLocaleString()} DH`} strong />
             </div>
             <div className="space-y-5">
               {lines.length === 0 ? <p className="py-16 text-center text-xs text-slate-400">{rentalText(language, 'No data for this selection.', 'Aucune donnee pour cette selection.')}</p> : lines.map((line) => (
                 <section key={line.project.id} className="break-inside-avoid">
                   <div className="flex items-center justify-between bg-slate-100 px-3 py-2">
                     <div><h2 className="text-xs font-bold">{line.project.rentalProperty?.buildingNumber || line.project.name}</h2><p className="text-[9px] text-slate-500">{line.project.address}</p></div>
-                    <p className="font-mono text-xs font-bold">{line.ownerPayout.toLocaleString()} {line.project.currency}</p>
+                    <div className="text-right"><p className="font-mono text-xs font-bold">{line.closingBalance.toLocaleString()} {line.project.currency}</p><p className={`text-[8px] font-bold uppercase ${line.finalized ? 'text-emerald-600' : 'text-amber-600'}`}>{line.finalized ? rentalText(language, 'Finalized', 'Finalise') : rentalText(language, 'Live draft', 'Brouillon')}</p></div>
                   </div>
                   <table className="w-full text-left text-[9px]">
                     <thead className="border-b border-slate-200 uppercase text-slate-400"><tr><th className="px-2 py-1.5">{rentalText(language, 'Type', 'Type')}</th><th className="px-2 py-1.5">{rentalText(language, 'Detail', 'Détail')}</th><th className="px-2 py-1.5">{rentalText(language, 'Period', 'Periode')}</th><th className="px-2 py-1.5 text-right">{rentalText(language, 'Amount', 'Montant')}</th></tr></thead>
@@ -1132,7 +1449,7 @@ function OwnerReportModal({
                       {line.bookings.length + line.expenses.length + line.services.length + line.payments.length === 0 && <tr><td colSpan={4} className="px-2 py-5 text-center text-slate-400">{rentalText(language, 'No activity this month.', 'Aucune activite ce mois.')}</td></tr>}
                     </tbody>
                   </table>
-                  <div className="mt-1 flex justify-end gap-5 text-[9px]"><span>{rentalText(language, 'Gross', 'Brut')}: <strong>{line.revenue.toLocaleString()}</strong></span><span>{rentalText(language, 'Commission', 'Commission')}: <strong>{line.commission.toLocaleString()}</strong></span><span>{rentalText(language, 'Costs', 'Frais')}: <strong>{(line.cleaningTotal + line.expenseTotal).toLocaleString()}</strong></span><span>{rentalText(language, 'Paid', 'Verse')}: <strong>{line.paidTotal.toLocaleString()}</strong></span></div>
+                  <div className="mt-1 flex justify-end gap-5 text-[9px]"><span>{rentalText(language, 'Opening', 'Ouverture')}: <strong>{line.openingBalance.toLocaleString()}</strong></span><span>{rentalText(language, 'Gross', 'Brut')}: <strong>{line.revenue.toLocaleString()}</strong></span><span>{rentalText(language, 'Commission', 'Commission')}: <strong>{line.commission.toLocaleString()}</strong></span><span>{rentalText(language, 'Costs', 'Frais')}: <strong>{(line.cleaningTotal + line.expenseTotal).toLocaleString()}</strong></span><span>{rentalText(language, 'Paid', 'Verse')}: <strong>{line.paidTotal.toLocaleString()}</strong></span><span>{rentalText(language, 'Closing', 'Cloture')}: <strong>{line.closingBalance.toLocaleString()}</strong></span></div>
                 </section>
               ))}
             </div>
@@ -1140,6 +1457,8 @@ function OwnerReportModal({
         </div>
       </div>
     </div>
+    <ConfirmDialog open={confirmFinalize} title={rentalText(language, 'Finalize owner statement?', 'Finaliser le relevé propriétaire ?')} message={rentalText(language, 'This freezes the current month totals as an accounting snapshot. Later changes will not silently rewrite this statement.', 'Les totaux du mois seront figés. Les modifications ultérieures ne réécriront pas silencieusement ce relevé.')} language={language} confirmLabel={rentalText(language, 'Finalize', 'Finaliser')} variant="default" loading={finalizing} onConfirm={finalizeStatements} onCancel={() => setConfirmFinalize(false)} />
+    </>
   );
 }
 
@@ -1163,12 +1482,16 @@ function LegacyRentalImportModal({
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ReturnType<typeof mergeLegacyRentalManifest>['stats'] | null>(null);
 
-  const loadFile = async (file?: File) => {
-    if (!file) return;
+  const loadFiles = async (selected?: FileList | File[]) => {
+    const files = selected ? Array.from(selected) : [];
+    if (files.length === 0) return;
     setError('');
     setResult(null);
     try {
-      setManifest(parseLegacyRentalManifest(await file.text()));
+      const jsonFile = files.length === 1 && files[0].name.toLowerCase().endsWith('.json');
+      setManifest(jsonFile
+        ? parseLegacyRentalManifest(await files[0].text())
+        : await parseRentalTabularFiles(files));
     } catch (reason) {
       setManifest(null);
       setError(reason instanceof Error ? reason.message : 'Could not read the migration package.');
@@ -1208,9 +1531,9 @@ function LegacyRentalImportModal({
         <div className="space-y-4 p-4">
           <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 bg-slate-50 px-4 text-center hover:border-purple-400 dark:border-slate-700 dark:bg-slate-950/50">
             <Upload className="mb-2 h-5 w-5 text-purple-600" />
-            <span className="text-xs font-bold text-slate-700 dark:text-slate-200">{rentalText(language, 'Choose the JSON migration package', 'Choisir le paquet JSON de migration')}</span>
-            <span className="mt-1 text-[10px] text-slate-400">migration-output/legacy-rentals-2023-2026.json</span>
-            <input type="file" accept="application/json,.json" className="sr-only" onChange={(event) => loadFile(event.target.files?.[0])} />
+            <span className="text-xs font-bold text-slate-700 dark:text-slate-200">{rentalText(language, 'Choose XLSX, CSV, or a JSON migration package', 'Choisir XLSX, CSV ou un paquet JSON')}</span>
+            <span className="mt-1 text-[10px] text-slate-400">.xlsx · .csv · .json</span>
+            <input type="file" multiple accept=".xlsx,.csv,application/json,.json" className="sr-only" onChange={(event) => loadFiles(event.target.files || undefined)} />
           </label>
           {error && <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300">{error}</div>}
           {manifest && totals && (
@@ -1269,11 +1592,12 @@ function CreateRentalForm({ language, t, user, onClose, onCreated }: {
     const projectId = `proj_${Date.now()}`;
     const newProject: Project = {
       id: projectId,
+      storageVersion: 2,
       name: name.trim(),
       clientName: ownerName.trim(),
       address: buildingNumber.trim(),
       description: `${buildingNumber.trim()} — ${ownerName.trim()}`,
-      startDate: new Date().toISOString().split('T')[0],
+      startDate: localDateKey(),
       estimatedEndDate: '',
       budget: 0,
       currency: 'DH',

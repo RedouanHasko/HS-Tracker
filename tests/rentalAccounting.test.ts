@@ -4,19 +4,25 @@ import test from 'node:test';
 import { Project, RentalBooking, RentalBookingPayment } from '../src/types';
 import {
   addRentalBookingPayment,
+  addRentalBookingRefund,
   bookingMonthSlice,
   isOwnerExpense,
   rentalBookingBalanceDue,
+  rentalBookingGuestTotal,
   rentalBookingCommission,
   rentalBookingOpeningBalance,
   rentalBookingOverpayment,
   rentalBookingPaidAmount,
+  rentalBookingRefundedAmount,
   rentalBookingStatusForDates,
+  rentalBookingDatesOverlap,
+  findRentalBookingConflict,
   removeRentalBookingPayment,
   syncRentalBookingPaymentTotals,
 } from '../src/utils/rentalAccounting';
 import { mergeLegacyRentalManifest } from '../src/utils/rentalLegacyImport';
 import { rentalText } from '../src/utils/rentalTranslations';
+import { parseRentalTabularFiles } from '../src/utils/rentalTabularImport';
 
 const project = {
   rentalProperty: {
@@ -55,6 +61,7 @@ test('monthly zero commission is a real decision and prorates owner cleaning', (
     commissionRate: 0,
     commission: 0,
     cleaning: 60,
+    channelFee: 0,
   });
 });
 
@@ -73,6 +80,27 @@ test('historical and current booking dates derive the correct operational status
   assert.equal(rentalBookingStatusForDates('2024-01-02', '2024-01-08', '2026-07-30'), 'completed');
   assert.equal(rentalBookingStatusForDates('2026-07-28', '2026-08-02', '2026-07-30'), 'active');
   assert.equal(rentalBookingStatusForDates('2026-08-02', '2026-08-08', '2026-07-30'), 'upcoming');
+});
+
+test('booking conflicts block overlaps but allow adjacent and cancelled stays', () => {
+  const existing = {
+    ...booking,
+    id: 'existing',
+    clientName: 'Existing Guest',
+    checkIn: '2026-08-10',
+    checkOut: '2026-08-14',
+    status: 'upcoming',
+  } as RentalBooking;
+
+  assert.equal(rentalBookingDatesOverlap('2026-08-12', '2026-08-16', existing.checkIn, existing.checkOut), true);
+  assert.equal(rentalBookingDatesOverlap('2026-08-14', '2026-08-17', existing.checkIn, existing.checkOut), false);
+  assert.equal(findRentalBookingConflict([existing], '2026-08-12', '2026-08-16')?.id, existing.id);
+  assert.equal(findRentalBookingConflict([existing], '2026-08-14', '2026-08-17'), undefined);
+  assert.equal(
+    findRentalBookingConflict([{ ...existing, status: 'cancelled' }], '2026-08-12', '2026-08-16'),
+    undefined
+  );
+  assert.equal(findRentalBookingConflict([existing], '2026-08-12', '2026-08-16', existing.id), undefined);
 });
 
 test('legacy import is idempotent and preserves existing project data', () => {
@@ -98,6 +126,18 @@ test('legacy import is idempotent and preserves existing project data', () => {
   assert.equal(first.stats.bookingsAdded, 1);
   assert.equal(second.changedProjects.length, 0);
   assert.equal(second.stats.bookingsAdded, 0);
+});
+
+test('direct CSV rental import recognizes bookings and expenses without a JSON manifest', async () => {
+  const csv = [
+    'Apartment,Owner,Guest,Check in,Check out,Price per night,Paid,Expense,Expense amount,Expense date',
+    'B6 1.4,Owner A,Hussein,23/08/2026,27/08/2026,1600,2000,Cleaning,300,27/08/2026',
+  ].join('\n');
+  const manifest = await parseRentalTabularFiles([new File([csv], 'rentals.csv', { type: 'text/csv' })]);
+  assert.equal(manifest.projects.length, 1);
+  assert.equal(manifest.projects[0].rentalBookings?.[0].clientName, 'Hussein');
+  assert.equal(manifest.projects[0].rentalBookings?.[0].totalAmount, 6400);
+  assert.equal(manifest.projects[0].expenses?.[0].amount, 300);
 });
 
 test('payment ledger preserves an existing paid total as its opening balance', () => {
@@ -127,6 +167,25 @@ test('lowering a booking price keeps payment history and exposes overpayment', (
   assert.equal(rentalBookingPaidAmount(repriced), 7000);
   assert.equal(rentalBookingBalanceDue(repriced), 0);
   assert.equal(rentalBookingOverpayment(repriced), 500);
+});
+
+test('guest fees, deposits, and refunds update the balance without changing accommodation commission', () => {
+  const withCharges = {
+    ...booking,
+    paidAmount: 0,
+    paymentOpeningBalance: 0,
+    payments: [{ id: 'paid', date: '2026-08-01', amount: 7600, method: 'cash', receiptNumber: 'REC-1', recordedAt: '2026-08-01T10:00:00Z' }],
+    securityDeposit: 500,
+    taxAmount: 100,
+  } as RentalBooking;
+  assert.equal(rentalBookingGuestTotal(withCharges), 7600);
+  assert.equal(rentalBookingBalanceDue(withCharges), 0);
+  assert.equal(rentalBookingCommission(withCharges, project), 1400);
+
+  const refunded = addRentalBookingRefund(withCharges, { id: 'refund', date: '2026-08-02', amount: 500, reason: 'Deposit returned', method: 'cash', recordedAt: '2026-08-02T10:00:00Z' });
+  assert.equal(rentalBookingRefundedAmount(refunded), 500);
+  assert.equal(rentalBookingPaidAmount(refunded), 7100);
+  assert.equal(rentalBookingBalanceDue(refunded), 500);
 });
 
 test('rental copy resolves consistently in every supported language', () => {

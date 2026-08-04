@@ -6,6 +6,7 @@ import DocumentPartySelector from './DocumentPartySelector';
 import ConfirmDialog, { ConfirmRequest } from './ConfirmDialog';
 import ExpenseReceiptField, { ExpenseReceiptDraft } from './ExpenseReceiptField';
 import ExpenseReceiptThumb from './ExpenseReceiptThumb';
+import ConstructionOperationsCenter from './ConstructionOperationsCenter';
 import { AppLoader, FadeIn } from './ui/AppLoader';
 import { AnimatePresence, motion } from 'motion/react';
 import { 
@@ -43,7 +44,8 @@ import {
   Building,
   Menu,
   Upload,
-  Loader2
+  Loader2,
+  Save,
 } from 'lucide-react';
 import { 
   Project, 
@@ -67,11 +69,13 @@ import {
   ProjectType,
   RentalBooking,
   RentalBookingPayment,
+  RentalRefund,
   RentalPaymentMethod,
   RentalBookingStatus,
   RentalOwnerPayment,
   Photo,
   PhotoType,
+  CivilDocumentRecord,
 } from '../types';
 import {
   bookingMonthSlice,
@@ -79,18 +83,25 @@ import {
   rentalBookingCommission,
   rentalBookingCommissionRate,
   rentalBookingBalanceDue,
+  rentalBookingGuestTotal,
   rentalBookingOpeningBalance,
   rentalBookingPaidAmount,
   rentalBookingOverpayment,
   rentalBookingRate,
   rentalBookingStatusForDates,
   rentalDaysBetween,
+  findRentalBookingConflict,
+  ownerCleaningDeduction,
   addRentalBookingPayment,
   removeRentalBookingPayment,
+  addRentalBookingRefund,
+  removeRentalBookingRefund,
+  rentalBookingRefundedAmount,
   syncRentalBookingPaymentTotals,
 } from '../utils/rentalAccounting';
 import { buildRentalPaymentReceiptDraft } from '../utils/rentalPaymentReceipt';
 import { rentalText } from '../utils/rentalTranslations';
+import { appDateKey, appDateKeyAfterDays } from '../utils/dateTime';
 import DatePickerInput from './ui/DatePickerInput';
 
 const EXPENSES_PER_PAGE = 11;
@@ -124,6 +135,7 @@ const EXPORT_COLUMNS = [
 ];
 import {
   loadDocumentParties,
+  saveDocumentParties,
   upsertDocumentParty,
   deleteDocumentParty,
   loadDocumentPresets,
@@ -155,7 +167,16 @@ import {
   sendProjectInvitation,
   revokeProjectInvitation,
   syncProjectAccessFieldsIfNeeded,
+  loadProjectTrash,
+  restoreProjectRecordFromTrash,
+  permanentlyDeleteProjectTrashRecord,
+  cancelCivilDocumentInDB,
+  loadUserDocumentSettingsFromDB,
+  saveCivilDocumentToDB,
+  saveUserDocumentSettingsToDB,
+  subscribeToCivilDocuments,
 } from '../lib/db';
+import { ProjectTrashDocument } from '../utils/projectStorage';
 import {
   uploadExpenseReceipt,
   deleteStorageFile,
@@ -225,7 +246,7 @@ export default function ProjectDetail({
   const [projectActivities, setProjectActivities] = useState<TimelineActivity[]>([]);
   
   // Tab Switcher state
-  const [activeTab, setActiveTab] = useState<'overview' | 'expenses' | 'tasks' | 'docs' | 'gallery' | 'rental'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'expenses' | 'tasks' | 'docs' | 'gallery' | 'operations' | 'rental'>('overview');
   const [resolvedGalleryUrls, setResolvedGalleryUrls] = useState<Record<string, string>>({});
   const [galleryPage, setGalleryPage] = useState(1);
   const [galleryPhotoType, setGalleryPhotoType] = useState<PhotoType>('progress');
@@ -244,6 +265,9 @@ export default function ProjectDetail({
   const [aiFocusId, setAiFocusId] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmRequest | null>(null);
   const [deletingProject, setDeletingProject] = useState(false);
+  const [trashRecords, setTrashRecords] = useState<ProjectTrashDocument[]>([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [trashBusyId, setTrashBusyId] = useState<string | null>(null);
   const addMemberPanelRef = useRef<HTMLDivElement>(null);
 
   const requestConfirm = (req: ConfirmRequest) => setConfirmDialog(req);
@@ -357,7 +381,7 @@ export default function ProjectDetail({
         project?.members[0]?.email ||
         (user?.email || '').toLowerCase()
     );
-    setExpenseDate(new Date().toISOString().split('T')[0]);
+    setExpenseDate(appDateKey());
     setEditingExpenseId(null);
     setShowAddExpense(true);
   }, [resetExpenseForm, project, user?.email]);
@@ -430,8 +454,8 @@ export default function ProjectDetail({
   const [docPresets, setDocPresets] = useState<DocumentPresetsMap>(DEFAULT_DOC_PRESETS);
   const [documentParties, setDocumentParties] = useState<DocumentParty[]>([]);
   const [docNumber, setDocNumber] = useState(() => generateDocNumber(DEFAULT_DOC_PRESETS.invoice.prefix));
-  const [docDate, setDocDate] = useState(new Date().toISOString().split('T')[0]);
-  const [docDueDate, setDocDueDate] = useState(new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
+  const [docDate, setDocDate] = useState(appDateKey());
+  const [docDueDate, setDocDueDate] = useState(appDateKeyAfterDays(15));
   const [docLogo, setDocLogo] = useState<string | null>(null);
   const [docPaperFormat, setDocPaperFormat] = useState<'A4'>('A4');
 
@@ -452,6 +476,11 @@ export default function ProjectDetail({
 
   // Items included in the printed sheet
   const [docItems, setDocItems] = useState<DocumentLineItem[]>([]);
+  const [savedCivilDocuments, setSavedCivilDocuments] = useState<CivilDocumentRecord[]>([]);
+  const [activeCivilDocumentId, setActiveCivilDocumentId] = useState<string | null>(null);
+  const [docSaving, setDocSaving] = useState(false);
+  const [docSaveMessage, setDocSaveMessage] = useState('');
+  const [docSettingsLoaded, setDocSettingsLoaded] = useState(false);
 
   // Item builder fields
   const [newItemDesc, setNewItemDesc] = useState('');
@@ -556,11 +585,108 @@ export default function ProjectDetail({
     persistCurrentDocPreset({ visibleColumns });
   };
 
-  const handleSaveDocumentAsPdf = useCallback(() => {
-    const typeLabel =
-      docType === 'invoice' ? 'Invoice' : docType === 'voucher' ? 'Voucher' : 'Receipt';
-    saveCivilDocumentAsPdf(`${typeLabel}_${docNumber || 'document'}`);
-  }, [docType, docNumber]);
+  const buildCivilDocumentDraft = useCallback((status: CivilDocumentRecord['status']) => ({
+    projectId,
+    kind: docType,
+    number: docNumber,
+    status,
+    documentDate: docDate,
+    dueDate: docDueDate,
+    currency: project?.currency || 'DH',
+    issuer: {
+      name: docSenderName,
+      email: docSenderEmail,
+      phone: docSenderPhone,
+      address: docSenderAddress,
+    },
+    recipient: {
+      kind: docRecipientKind,
+      name: docClientName,
+      email: docClientEmail,
+      phone: docClientPhone,
+      address: docClientAddress,
+    },
+    items: docItems,
+    visibleColumns: docVisibleColumns,
+    taxRate: docTaxRate,
+    notes: docNotes,
+    subtotal: docSubtotal,
+    total: docTotal,
+    ...(status === 'finalized' ? { lastExportedAt: new Date().toISOString() } : {}),
+  }), [
+    projectId,
+    project?.currency,
+    docType,
+    docNumber,
+    docDate,
+    docDueDate,
+    docSenderName,
+    docSenderEmail,
+    docSenderPhone,
+    docSenderAddress,
+    docRecipientKind,
+    docClientName,
+    docClientEmail,
+    docClientPhone,
+    docClientAddress,
+    docItems,
+    docVisibleColumns,
+    docTaxRate,
+    docNotes,
+    docSubtotal,
+    docTotal,
+  ]);
+
+  const saveCurrentCivilDocument = useCallback(async (
+    status: CivilDocumentRecord['status'],
+  ) => {
+    const current = activeCivilDocumentId
+      ? savedCivilDocuments.find((item) => item.id === activeCivilDocumentId)
+      : undefined;
+    if (current?.status === 'cancelled') throw new Error('Cancelled documents cannot be changed.');
+    setDocSaving(true);
+    setDocSaveMessage('');
+    try {
+      const saved = await saveCivilDocumentToDB(
+        projectId,
+        buildCivilDocumentDraft(status),
+        activeCivilDocumentId || undefined,
+      );
+      setActiveCivilDocumentId(saved.id);
+      setDocNumber(saved.number);
+      setDocSaveMessage(
+        language === 'fr'
+          ? `${saved.number} enregistre (version ${saved.version}).`
+          : language === 'ar'
+            ? `تم حفظ ${saved.number} (الإصدار ${saved.version}).`
+            : `${saved.number} saved (version ${saved.version}).`
+      );
+      return saved;
+    } finally {
+      setDocSaving(false);
+    }
+  }, [
+    activeCivilDocumentId,
+    savedCivilDocuments,
+    projectId,
+    buildCivilDocumentDraft,
+    language,
+  ]);
+
+  const handleSaveDocumentAsPdf = useCallback(async () => {
+    try {
+      const saved = await saveCurrentCivilDocument('finalized');
+      const typeLabel =
+        docType === 'invoice' ? 'Invoice' : docType === 'voucher' ? 'Voucher' : 'Receipt';
+      saveCivilDocumentAsPdf(`${typeLabel}_${saved.number}`);
+    } catch (error) {
+      showAlert(
+        language === 'fr' ? 'Document non enregistre' : language === 'ar' ? 'لم يتم حفظ المستند' : 'Document not saved',
+        error instanceof Error ? error.message : 'Could not save this document.',
+        'danger',
+      );
+    }
+  }, [saveCurrentCivilDocument, docType, language, showAlert]);
 
   /** Persist per-document-type preset (tax, notes, paper) for the active type */
   const persistCurrentDocPreset = useCallback(
@@ -588,6 +714,8 @@ export default function ProjectDetail({
       }
       const preset = presets[kind];
       setDocType(kind);
+      setActiveCivilDocumentId(null);
+      setDocSaveMessage('');
       setDocNumber(generateDocNumber(preset.prefix));
       setDocTaxRate(preset.taxRate);
       setDocNotes(preset.defaultNotes);
@@ -629,16 +757,97 @@ export default function ProjectDetail({
 
   useEffect(() => {
     if (!user?.uid) return;
-    setDocumentParties(loadDocumentParties(user.uid));
-    const presets = loadDocumentPresets(user.uid);
-    setDocPresets(presets);
-    const initial = presets.invoice;
-    setDocNumber(generateDocNumber(initial.prefix));
-    setDocTaxRate(initial.taxRate);
-    setDocNotes(initial.defaultNotes);
-    setDocPaperFormat('A4');
-    setDocVisibleColumns(initial.visibleColumns);
+    let active = true;
+    setDocSettingsLoaded(false);
+    const localParties = loadDocumentParties(user.uid);
+    const localPresets = loadDocumentPresets(user.uid);
+    const applySettings = (parties: DocumentParty[], presets: DocumentPresetsMap) => {
+      if (!active) return;
+      setDocumentParties(parties);
+      setDocPresets(presets);
+      const initial = presets.invoice;
+      setDocNumber(generateDocNumber(initial.prefix));
+      setDocTaxRate(initial.taxRate);
+      setDocNotes(initial.defaultNotes);
+      setDocPaperFormat('A4');
+      setDocVisibleColumns(initial.visibleColumns);
+      setDocSettingsLoaded(true);
+    };
+    loadUserDocumentSettingsFromDB(user.uid, localParties, localPresets)
+      .then((settings) => {
+        if (!active) return;
+        saveDocumentParties(user.uid, settings.parties || []);
+        saveDocumentPresets(user.uid, settings.presets || localPresets);
+        applySettings(settings.parties || [], settings.presets || localPresets);
+      })
+      .catch((error) => {
+        console.error('Could not synchronize document settings:', error);
+        applySettings(localParties, localPresets);
+      });
+    return () => {
+      active = false;
+    };
   }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid || !docSettingsLoaded) return;
+    const timer = window.setTimeout(() => {
+      saveUserDocumentSettingsToDB(user.uid, documentParties, docPresets)
+        .catch((error) => console.error('Could not save document settings:', error));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [user?.uid, docSettingsLoaded, documentParties, docPresets]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    return subscribeToCivilDocuments(projectId, setSavedCivilDocuments);
+  }, [projectId]);
+
+  const loadCivilDocumentIntoEditor = (saved: CivilDocumentRecord) => {
+    setActiveCivilDocumentId(saved.id);
+    setDocType(saved.kind);
+    setDocNumber(saved.number);
+    setDocDate(saved.documentDate);
+    setDocDueDate(saved.dueDate);
+    setDocSenderName(saved.issuer.name);
+    setDocSenderEmail(saved.issuer.email);
+    setDocSenderPhone(saved.issuer.phone);
+    setDocSenderAddress(saved.issuer.address);
+    setDocRecipientKind(saved.recipient.kind);
+    setDocClientName(saved.recipient.name);
+    setDocClientEmail(saved.recipient.email);
+    setDocClientPhone(saved.recipient.phone);
+    setDocClientAddress(saved.recipient.address);
+    setDocItems(saved.items);
+    setDocVisibleColumns(saved.visibleColumns);
+    setDocTaxRate(saved.taxRate);
+    setDocNotes(saved.notes);
+    setDocPaperFormat('A4');
+    setDocSaveMessage('');
+  };
+
+  const startNewCivilDocument = () => {
+    setActiveCivilDocumentId(null);
+    setDocNumber(generateDocNumber(docPresets[docType].prefix));
+    setDocItems([]);
+    setDocSaveMessage('');
+  };
+
+  const promptCancelCivilDocument = (saved: CivilDocumentRecord) => {
+    requestConfirm({
+      title: language === 'fr' ? 'Annuler ce document ?' : language === 'ar' ? 'إلغاء هذا المستند؟' : 'Cancel this document?',
+      message: language === 'fr'
+        ? `${saved.number} restera dans l'historique avec le statut annule.`
+        : language === 'ar'
+          ? `سيبقى ${saved.number} في السجل بحالة ملغى.`
+          : `${saved.number} will remain in history with cancelled status.`,
+      confirmLabel: language === 'fr' ? 'Annuler le document' : language === 'ar' ? 'إلغاء المستند' : 'Cancel document',
+      onConfirm: async () => {
+        await cancelCivilDocumentInDB(project.id, saved.id);
+        if (activeCivilDocumentId === saved.id) startNewCivilDocument();
+      },
+    });
+  };
 
   useEffect(() => {
     if (!projectId) return;
@@ -691,6 +900,9 @@ export default function ProjectDetail({
 
   useEffect(() => {
     if (project?.projectType !== 'rental' && activeTab === 'rental') {
+      setActiveTab('overview');
+    }
+    if (project?.projectType !== 'construction' && activeTab === 'operations') {
       setActiveTab('overview');
     }
   }, [project?.projectType, activeTab]);
@@ -809,6 +1021,26 @@ export default function ProjectDetail({
     }
     onOpenSettingsConsumed?.();
   }, [openSettingsOnLoad, project, user?.email, onOpenSettingsConsumed]);
+
+  useEffect(() => {
+    if (!showSettings || project?.storageVersion !== 2) {
+      setTrashRecords([]);
+      return;
+    }
+    let active = true;
+    setTrashLoading(true);
+    loadProjectTrash(project.id)
+      .then((records) => {
+        if (active) setTrashRecords(records);
+      })
+      .catch((error) => console.error('Could not load project trash:', error))
+      .finally(() => {
+        if (active) setTrashLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [showSettings, project?.id, project?.storageVersion, project?.recordRevision]);
 
   const galleryItems = useMemo(() => {
     if (!project) return [];
@@ -936,11 +1168,15 @@ export default function ProjectDetail({
   const isSettlementWorkspace = project.projectType === 'service';
   const percentSpent = hasBudget ? Math.round((totalSpent / project.budget) * 100) : 0;
   const rentalBookings = project.rentalBookings || [];
-  const rentalRevenue = rentalBookings.reduce((s, b) => s + b.totalAmount, 0);
-  const rentalCommission = rentalBookings.reduce((s, b) => s + b.commission, 0);
-  const rentalOwnerPayout = rentalBookings.reduce((s, b) => s + b.ownerPayout, 0);
-  const rentalPaid = rentalBookings.reduce((s, b) => s + rentalBookingPaidAmount(b), 0);
-  const rentalBalanceDue = rentalBookings.reduce((s, b) => s + rentalBookingBalanceDue(b), 0);
+  const billableRentalBookings = rentalBookings.filter((booking) => booking.status !== 'cancelled');
+  const rentalRevenue = billableRentalBookings.reduce((s, b) => s + b.totalAmount, 0);
+  const rentalCommission = billableRentalBookings.reduce((s, b) => s + rentalBookingCommission(b, project), 0);
+  const rentalOwnerPayout = billableRentalBookings.reduce(
+    (s, b) => s + b.totalAmount - rentalBookingCommission(b, project) - ownerCleaningDeduction(b) - Math.max(0, b.channelFee || 0),
+    0
+  );
+  const rentalPaid = billableRentalBookings.reduce((s, b) => s + rentalBookingPaidAmount(b), 0);
+  const rentalBalanceDue = billableRentalBookings.reduce((s, b) => s + rentalBookingBalanceDue(b), 0);
   const rentalNetOwner = rentalOwnerPayout - totalSpent;
 
   const userEmail = (user?.email || '').toLowerCase();
@@ -1258,7 +1494,7 @@ export default function ProjectDetail({
         commissionPercent: expenseCommission > 0 ? expenseCommission : undefined,
         currency: project.currency,
         category: expenseCat,
-        date: expenseDate || new Date().toISOString().split('T')[0],
+        date: expenseDate || appDateKey(),
         paidBy:
           expensePaidBy ||
           project.members.find((m) => m.status === 'accepted' || !m.status)?.email ||
@@ -1361,7 +1597,7 @@ export default function ProjectDetail({
       to,
       toName: toMember ? toMember.name : to,
       amount: Math.round(amount * 100) / 100,
-      date: new Date().toISOString().split('T')[0]
+      date: appDateKey()
     };
 
     const updatedProj = {
@@ -1414,7 +1650,7 @@ export default function ProjectDetail({
         to: reimbTo,
         toName: toMember?.name || reimbTo,
         amount: Math.round(reimbAmount * 100) / 100,
-        date: reimbDate || new Date().toISOString().split('T')[0],
+        date: reimbDate || appDateKey(),
       };
 
       const reimbursements = (project.reimbursements || []).map((r) =>
@@ -1613,6 +1849,68 @@ export default function ProjectDetail({
     });
   };
 
+  const trashRecordLabel = (record: ProjectTrashDocument) => {
+    const payload = record.payload as Record<string, unknown>;
+    const label = payload.title || payload.clientName || payload.name || payload.description;
+    return typeof label === 'string' && label.trim() ? label : record.entityId;
+  };
+
+  const handleRestoreTrashRecord = async (record: ProjectTrashDocument) => {
+    setTrashBusyId(record.entityId);
+    try {
+      const recordId = `${record.kind}__${encodeURIComponent(record.entityId)}`;
+      await restoreProjectRecordFromTrash(project.id, recordId);
+      setTrashRecords((current) => current.filter((item) => item !== record));
+    } catch (error) {
+      showAlert(
+        language === 'fr' ? 'Restauration impossible' : language === 'ar' ? 'تعذر الاسترجاع' : 'Restore failed',
+        error instanceof Error ? error.message : 'Could not restore this record.',
+        'danger'
+      );
+    } finally {
+      setTrashBusyId(null);
+    }
+  };
+
+  const promptRestoreTrashRecord = (record: ProjectTrashDocument) => {
+    requestConfirm({
+      title: language === 'fr' ? 'Restaurer cet element ?' : language === 'ar' ? 'استرجاع هذا العنصر؟' : 'Restore this item?',
+      message: `${trashRecordLabel(record)} (${record.kind.replaceAll('_', ' ')})`,
+      confirmLabel: language === 'fr' ? 'Restaurer' : language === 'ar' ? 'استرجاع' : 'Restore',
+      variant: 'default',
+      onConfirm: () => handleRestoreTrashRecord(record),
+    });
+  };
+
+  const handlePermanentlyDeleteTrashRecord = async (record: ProjectTrashDocument) => {
+    setTrashBusyId(record.entityId);
+    try {
+      const recordId = `${record.kind}__${encodeURIComponent(record.entityId)}`;
+      await permanentlyDeleteProjectTrashRecord(project.id, recordId);
+      setTrashRecords((current) => current.filter((item) => item !== record));
+    } catch (error) {
+      showAlert(
+        language === 'fr' ? 'Suppression impossible' : language === 'ar' ? 'تعذر الحذف' : 'Delete failed',
+        error instanceof Error ? error.message : 'Could not permanently delete this record.',
+        'danger'
+      );
+    } finally {
+      setTrashBusyId(null);
+    }
+  };
+
+  const promptPermanentlyDeleteTrashRecord = (record: ProjectTrashDocument) => {
+    requestConfirm({
+      title: language === 'fr' ? 'Supprimer definitivement ?' : language === 'ar' ? 'حذف نهائي؟' : 'Delete permanently?',
+      message: language === 'fr'
+        ? `${trashRecordLabel(record)} et ses medias seront supprimes sans possibilite de restauration.`
+        : language === 'ar'
+          ? `سيتم حذف ${trashRecordLabel(record)} والوسائط المرتبطة به نهائيا.`
+          : `${trashRecordLabel(record)} and its referenced media will be removed with no recovery.`,
+      onConfirm: () => handlePermanentlyDeleteTrashRecord(record),
+    });
+  };
+
   const promptDeleteExpense = (expId: string) => {
     const item = project?.expenses.find((e) => e.id === expId);
     if (!item) return;
@@ -1674,7 +1972,7 @@ export default function ProjectDetail({
       description: taskDesc.trim() || "No details provided.",
       assignedTo: assignee,
       priority: taskPriority,
-      deadline: taskDeadline || new Date(Date.now() + 7 * 24 * 60 * 60 * 1050).toISOString().split('T')[0],
+      deadline: taskDeadline || appDateKeyAfterDays(7),
       status: 'pending',
       subtasks: [],
       createdBy: userEmail,
@@ -2079,6 +2377,19 @@ export default function ProjectDetail({
           } ${aiFocusId === 'project-tab-gallery' ? 'project-tab-ai-focus' : ''}`}
         >
           {language === 'en' ? 'Gallery' : language === 'fr' ? 'Galerie' : 'المعرض'}
+        </button>
+        )}
+        {project?.projectType === 'construction' && (
+        <button
+          id="project-tab-operations"
+          onClick={() => setActiveTab('operations')}
+          className={`shrink-0 whitespace-nowrap border-b-2 pb-2 text-xs font-bold uppercase tracking-wider transition-all ${
+            activeTab === 'operations'
+              ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white'
+              : 'border-transparent text-slate-450 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+          }`}
+        >
+          {language === 'en' ? 'Site operations' : language === 'fr' ? 'Opérations chantier' : 'عمليات الورشة'}
         </button>
         )}
         {project?.projectType === 'rental' && (
@@ -2733,7 +3044,6 @@ export default function ProjectDetail({
                     ? (language === 'fr' ? 'Taches de service appartement' : language === 'ar' ? 'Apartment service tasks' : 'Apartment Service Tasks')
                     : (language === 'fr' ? 'Suivi des jalons & Taches' : language === 'ar' ? 'Roadmap and tasks' : 'Construction Roadmap & Deliverables')}
                 </span>
-                {language === 'en' ? 'Construction Roadmap & Deliverables' : language === 'fr' ? 'Suivi des jalons & Tâches' : 'المسار الزمني والمهام'}
                 <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono font-bold">
                   {project.tasks.length}
                 </span>
@@ -2991,6 +3301,84 @@ export default function ProjectDetail({
               </div>
             </div>
           </div>
+
+          <section className="no-print rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 dark:text-white">
+                  {language === 'fr' ? 'Documents enregistres' : language === 'ar' ? 'Saved documents' : 'Saved documents'}
+                </h3>
+                <p className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
+                  {language === 'fr' ? 'Brouillons et documents finalises de ce projet.' : 'Drafts and finalized documents for this project.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={startNewCivilDocument}
+                className="inline-flex items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {language === 'fr' ? 'Nouveau document' : 'New document'}
+              </button>
+            </div>
+            <div className="overflow-x-auto p-3">
+              {savedCivilDocuments.length === 0 ? (
+                <p className="px-1 py-3 text-center text-xs text-slate-500 dark:text-slate-400">
+                  {language === 'fr' ? 'Aucun document enregistre.' : 'No saved documents yet.'}
+                </p>
+              ) : (
+                <div className="flex min-w-max gap-2">
+                  {savedCivilDocuments.slice(0, 12).map((savedDocument) => (
+                    <div
+                      key={savedDocument.id}
+                      className={`w-64 rounded-md border p-3 ${
+                        activeCivilDocumentId === savedDocument.id
+                          ? 'border-sky-400 bg-sky-50 dark:border-sky-700 dark:bg-sky-950/30'
+                          : 'border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-mono text-xs font-bold text-slate-900 dark:text-white">{savedDocument.number}</p>
+                          <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400">
+                            {savedDocument.recipient.name || (language === 'fr' ? 'Sans destinataire' : 'No recipient')}
+                          </p>
+                        </div>
+                        <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[9px] font-bold uppercase text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {savedDocument.status}
+                        </span>
+                      </div>
+                      <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-2 dark:border-slate-800">
+                        <span className="font-mono text-[11px] font-bold text-sky-600 dark:text-sky-400">
+                          {savedDocument.total.toLocaleString()} {savedDocument.currency}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => loadCivilDocumentIntoEditor(savedDocument)}
+                            className="rounded-md px-2 py-1 text-[10px] font-bold text-slate-700 hover:bg-white dark:text-slate-200 dark:hover:bg-slate-800"
+                          >
+                            {language === 'fr' ? 'Ouvrir' : 'Open'}
+                          </button>
+                          {savedDocument.status !== 'cancelled' && (
+                            <button
+                              type="button"
+                              title={language === 'fr' ? 'Annuler le document' : 'Cancel document'}
+                              aria-label={language === 'fr' ? 'Annuler le document' : 'Cancel document'}
+                              onClick={() => promptCancelCivilDocument(savedDocument)}
+                              className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
 
           <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(34rem,0.9fr)_minmax(0,1.5fr)]">
             
@@ -3481,14 +3869,37 @@ export default function ProjectDetail({
                   </span>
                 </div>
                 
-                <button
-                  type="button"
-                  onClick={handleSaveDocumentAsPdf}
-                  className="flex items-center justify-center gap-1.5 rounded-md bg-sky-500 px-3 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-sky-600 cursor-pointer shrink-0"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>{language === 'en' ? 'Save as PDF' : language === 'fr' ? 'Enregistrer en PDF' : 'حفظ كـ PDF'}</span>
-                </button>
+                <div className="flex flex-col gap-2 sm:items-end">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={docSaving || docItems.length === 0}
+                      onClick={() => {
+                        saveCurrentCivilDocument('draft').catch((error) => {
+                          showAlert(
+                            language === 'fr' ? 'Document non enregistre' : 'Document not saved',
+                            error instanceof Error ? error.message : 'Could not save this document.',
+                            'danger',
+                          );
+                        });
+                      }}
+                      className="flex items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      {docSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                      <span>{language === 'fr' ? 'Enregistrer' : 'Save draft'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={docSaving || docItems.length === 0}
+                      onClick={handleSaveDocumentAsPdf}
+                      className="flex items-center justify-center gap-1.5 rounded-md bg-sky-500 px-3 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50 shrink-0"
+                    >
+                      {docSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                      <span>{language === 'en' ? 'Save as PDF' : language === 'fr' ? 'Enregistrer en PDF' : 'Save as PDF'}</span>
+                    </button>
+                  </div>
+                  {docSaveMessage && <p className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">{docSaveMessage}</p>}
+                </div>
               </div>
 
               {/* LIVE PAGE CARD — only this block is exported */}
@@ -3816,6 +4227,17 @@ export default function ProjectDetail({
             }}
           />
         </div>
+        </FadeIn>
+      )}
+      {activeTab === 'operations' && project.projectType === 'construction' && (
+        <FadeIn key="operations">
+          <ConstructionOperationsCenter
+            project={project}
+            language={language}
+            canManage={perm.canModifySettings}
+            onSave={syncProjectChanges}
+            onRequestConfirm={requestConfirm}
+          />
         </FadeIn>
       )}
       </AnimatePresence>
@@ -4502,6 +4924,61 @@ export default function ProjectDetail({
                 />
               </div>
 
+              {project.storageVersion === 2 && (
+                <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">
+                        {language === 'fr' ? 'Elements recemment supprimes' : language === 'ar' ? 'العناصر المحذوفة مؤخرا' : 'Recently deleted'}
+                      </p>
+                      <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                        {language === 'fr' ? 'Restaurez un element ou supprimez-le definitivement.' : language === 'ar' ? 'استرجع العنصر أو احذفه نهائيا.' : 'Restore an item or permanently remove it and its media.'}
+                      </p>
+                    </div>
+                    {trashLoading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
+                  </div>
+                  {!trashLoading && trashRecords.length === 0 && (
+                    <p className="mt-3 rounded-md border border-dashed border-slate-300 px-3 py-2 text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                      {language === 'fr' ? 'Aucun element supprime.' : language === 'ar' ? 'لا توجد عناصر محذوفة.' : 'No deleted items.'}
+                    </p>
+                  )}
+                  <div className="mt-2 max-h-44 space-y-2 overflow-y-auto">
+                    {trashRecords.map((record) => (
+                      <div key={`${record.kind}-${record.entityId}`} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-white p-2 dark:border-slate-800 dark:bg-slate-900">
+                        <div className="min-w-0">
+                          <p className="truncate text-[11px] font-semibold text-slate-800 dark:text-slate-100">
+                            {trashRecordLabel(record)}
+                          </p>
+                          <p className="text-[9px] uppercase text-slate-400">
+                            {record.kind.replaceAll('_', ' ')} · {new Date(record.deletedAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => promptRestoreTrashRecord(record)}
+                            disabled={trashBusyId === record.entityId}
+                            className="rounded-md border border-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                          >
+                            {language === 'fr' ? 'Restaurer' : language === 'ar' ? 'استرجاع' : 'Restore'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => promptPermanentlyDeleteTrashRecord(record)}
+                            disabled={trashBusyId === record.entityId}
+                            className="rounded-md p-1.5 text-red-500 hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-950/30"
+                            aria-label="Delete permanently"
+                            title="Delete permanently"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {isProjectOwner(project, userEmail) && (
                 <div className="rounded-lg border border-red-200 bg-red-50/50 p-3 dark:border-red-900/40 dark:bg-red-950/20">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-red-600 dark:text-red-400">
@@ -4594,7 +5071,7 @@ function RentalOwnerStatement({ project, language, canManage, onSave }: { projec
   const [commissionRate, setCommissionRate] = useState(property?.monthlyCommissionRates?.[currentMonth] ?? property?.commissionRate ?? 0);
   const [saving, setSaving] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState(0);
-  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().slice(0, 10));
+  const [paymentDate, setPaymentDate] = useState(appDateKey());
   const [paymentMethod, setPaymentMethod] = useState<NonNullable<RentalOwnerPayment['method']>>('bank_transfer');
   const [paymentNotes, setPaymentNotes] = useState('');
 
@@ -4619,8 +5096,9 @@ function RentalOwnerStatement({ project, language, canManage, onSave }: { projec
   const expenseTotal = ownerExpenses.reduce((sum, expense) => sum + expense.amount, 0);
   const commission = stays.reduce((sum, stay) => sum + stay.commission, 0);
   const cleaningTotal = stays.reduce((sum, stay) => sum + stay.cleaning, 0);
+  const channelFeeTotal = stays.reduce((sum, stay) => sum + stay.channelFee, 0);
   const ownerPaid = ownerPayments.reduce((sum, payment) => sum + payment.amount, 0);
-  const ownerPayout = gross - commission - cleaningTotal - expenseTotal;
+  const ownerPayout = gross - commission - cleaningTotal - channelFeeTotal - expenseTotal;
   const remainingPayout = ownerPayout - ownerPaid;
   const monthLabel = new Intl.DateTimeFormat(
     language === 'fr' ? 'fr-FR' : language === 'ar' ? 'ar-MA' : 'en-US',
@@ -4643,7 +5121,7 @@ function RentalOwnerStatement({ project, language, canManage, onSave }: { projec
         if (booking.commissionRate !== undefined) return booking;
         const bookingCommission = Math.round(booking.totalAmount * finalRate) / 100;
         const cleaning = booking.cleaningChargeTo === 'owner' ? booking.cleaningFee || 0 : 0;
-        return { ...booking, commission: bookingCommission, ownerPayout: booking.totalAmount - bookingCommission - cleaning };
+        return { ...booking, commission: bookingCommission, ownerPayout: booking.totalAmount - bookingCommission - cleaning - Math.max(0, booking.channelFee || 0) };
       }),
     });
     setSaving(false);
@@ -4719,6 +5197,10 @@ function RentalBookingForm({ project, language, t, onSave }: {
   const [commissionRate, setCommissionRate] = useState('');
   const [cleaningFee, setCleaningFee] = useState(0);
   const [cleaningChargeTo, setCleaningChargeTo] = useState<NonNullable<RentalBooking['cleaningChargeTo']>>('owner');
+  const [securityDeposit, setSecurityDeposit] = useState(0);
+  const [channelFee, setChannelFee] = useState(0);
+  const [taxAmount, setTaxAmount] = useState(0);
+  const [cancellationFee, setCancellationFee] = useState(0);
   const [bookingError, setBookingError] = useState('');
 
   if (!project.rentalProperty) return null;
@@ -4738,6 +5220,21 @@ function RentalBookingForm({ project, language, t, onSave }: {
       );
       return;
     }
+    const conflictingBooking = findRentalBookingConflict(
+      project.rentalBookings || [],
+      checkIn,
+      checkOut
+    );
+    if (conflictingBooking) {
+      setBookingError(
+        language === 'fr'
+          ? `Ces dates chevauchent la reservation de ${conflictingBooking.clientName} (${conflictingBooking.checkIn} - ${conflictingBooking.checkOut}).`
+          : language === 'ar'
+            ? `هذه التواريخ تتعارض مع حجز ${conflictingBooking.clientName} (${conflictingBooking.checkIn} - ${conflictingBooking.checkOut}).`
+            : `These dates overlap ${conflictingBooking.clientName}'s booking (${conflictingBooking.checkIn} - ${conflictingBooking.checkOut}).`
+      );
+      return;
+    }
     setBookingError('');
     const nights = rentalDaysBetween(checkIn, checkOut);
     const finalNightlyRate = Math.max(0, nightlyRate);
@@ -4746,11 +5243,12 @@ function RentalBookingForm({ project, language, t, onSave }: {
     const commission = bookingCommissionRate === undefined ? 0 : Math.round(total * bookingCommissionRate) / 100;
     const ownerCleaning = cleaningChargeTo === 'owner' ? Math.max(0, cleaningFee) : 0;
     const status = rentalBookingStatusForDates(checkIn, checkOut);
-    const initialPaidAmount = Math.min(total, Math.max(0, paidAmount));
+    const guestTotal = total + securityDeposit + taxAmount + cancellationFee + (cleaningChargeTo === 'guest' ? cleaningFee : 0);
+    const initialPaidAmount = Math.min(guestTotal, Math.max(0, paidAmount));
     const initialPayment: RentalBookingPayment | null = initialPaidAmount > 0
       ? {
           id: `payment_${Date.now()}`,
-          date: new Date().toISOString().split('T')[0],
+          date: appDateKey(),
           amount: initialPaidAmount,
           method: 'other',
           notes: rentalText(language, 'Initial payment', 'Paiement initial'),
@@ -4772,12 +5270,16 @@ function RentalBookingForm({ project, language, t, onSave }: {
       commission,
       cleaningFee: Math.max(0, cleaningFee),
       cleaningChargeTo,
-      ownerPayout: total - commission - ownerCleaning,
+      securityDeposit: Math.max(0, securityDeposit),
+      channelFee: Math.max(0, channelFee),
+      taxAmount: Math.max(0, taxAmount),
+      cancellationFee: Math.max(0, cancellationFee),
+      ownerPayout: total - commission - ownerCleaning - Math.max(0, channelFee),
       status,
       source: bookingSource,
       notes: bookingNotes,
       paidAmount: initialPaidAmount,
-      balanceDue: Math.max(0, total - initialPaidAmount),
+      balanceDue: Math.max(0, guestTotal - initialPaidAmount),
       paymentOpeningBalance: 0,
       payments: initialPayment ? [initialPayment] : [],
       historicalEntry: status === 'completed',
@@ -4801,6 +5303,10 @@ function RentalBookingForm({ project, language, t, onSave }: {
     setCommissionRate('');
     setCleaningFee(0);
     setCleaningChargeTo('owner');
+    setSecurityDeposit(0);
+    setChannelFee(0);
+    setTaxAmount(0);
+    setCancellationFee(0);
     setBookingError('');
     setShowForm(false);
   };
@@ -4880,6 +5386,10 @@ function RentalBookingForm({ project, language, t, onSave }: {
             <option value="management">{rentalText(language, 'Management', 'Notre société')}</option>
           </select>
         </div>
+        <div><label className="mb-1 block text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Security deposit', 'Dépôt de garantie')}</label><input type="number" min={0} step="any" value={securityDeposit || ''} onChange={e => setSecurityDeposit(Math.max(0, Number(e.target.value) || 0))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></div>
+        <div><label className="mb-1 block text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Channel fee', 'Frais de plateforme')}</label><input type="number" min={0} step="any" value={channelFee || ''} onChange={e => setChannelFee(Math.max(0, Number(e.target.value) || 0))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></div>
+        <div><label className="mb-1 block text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Taxes charged to guest', 'Taxes client')}</label><input type="number" min={0} step="any" value={taxAmount || ''} onChange={e => setTaxAmount(Math.max(0, Number(e.target.value) || 0))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></div>
+        <div><label className="mb-1 block text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Cancellation fee', 'Frais d’annulation')}</label><input type="number" min={0} step="any" value={cancellationFee || ''} onChange={e => setCancellationFee(Math.max(0, Number(e.target.value) || 0))} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></div>
         <div>
           <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{language === 'en' ? 'Booking Source' : language === 'fr' ? 'Source réservation' : 'مصدر الحجز'}</label>
           <input type="text" value={bookingSource} onChange={e => setBookingSource(e.target.value)} placeholder="Airbnb, Booking, Direct..." className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
@@ -4904,7 +5414,8 @@ function RentalBookingForm({ project, language, t, onSave }: {
             </span>
           </div>
           <div className="flex justify-between"><span>{nights} {t.rental.nights} × {nightlyRate} {project.currency}</span><span>{previewTotal} {project.currency}</span></div>
-          <div className="flex justify-between"><span>{t.rental.balanceDue}</span><span>{Math.max(0, previewTotal - Math.max(0, paidAmount))} {project.currency}</span></div>
+          <div className="flex justify-between"><span>{rentalText(language, 'Guest total with fees/deposit', 'Total client avec frais/dépôt')}</span><span>{previewTotal + securityDeposit + taxAmount + cancellationFee + (cleaningChargeTo === 'guest' ? cleaningFee : 0)} {project.currency}</span></div>
+          <div className="flex justify-between"><span>{t.rental.balanceDue}</span><span>{Math.max(0, previewTotal + securityDeposit + taxAmount + cancellationFee + (cleaningChargeTo === 'guest' ? cleaningFee : 0) - Math.max(0, paidAmount))} {project.currency}</span></div>
           <div className="border-t border-slate-200 pt-1 text-[10px] text-slate-400 dark:border-slate-800">{commissionRate === '' ? (rentalText(language, 'Commission will be decided in the monthly statement.', 'La commission sera décidée dans le relevé mensuel.')) : `${commissionRate}% ${rentalText(language, 'for this booking', 'pour ce séjour')}`}</div>
         </div>
       )}
@@ -4971,6 +5482,13 @@ function RentalBookingList({
     await onUpdate(updated);
   };
 
+  const updateStayOperations = async (booking: RentalBooking, patch: Partial<NonNullable<RentalBooking['operations']>>) => {
+    await onUpdate({
+      ...project,
+      rentalBookings: bookings.map((item) => item.id === booking.id ? { ...item, operations: { ...item.operations, ...patch } } : item),
+    });
+  };
+
   const requestDeleteBooking = (booking: RentalBooking) => {
     onRequestConfirm({
       title: rentalText(language, 'Delete booking?', 'Supprimer la réservation ?'),
@@ -5027,6 +5545,7 @@ function RentalBookingList({
             </div>
             <div className="text-right text-xs">
               <p className="font-bold text-slate-900 dark:text-white">{b.totalAmount} {project.currency}</p>
+              {(rentalBookingGuestTotal(b) !== b.totalAmount || rentalBookingRefundedAmount(b) > 0) && <p className="text-[10px] text-slate-400">{rentalText(language, 'Guest total', 'Total client')}: {rentalBookingGuestTotal(b)} · {rentalText(language, 'Refunded', 'Remboursé')}: {rentalBookingRefundedAmount(b)}</p>}
               {rentalBookingCommission(b, project) > 0
                 || b.commissionRate !== undefined
                 || project.rentalProperty?.monthlyCommissionRates?.[b.checkIn.slice(0, 7)] !== undefined ? (
@@ -5052,6 +5571,12 @@ function RentalBookingList({
               {b.notes}
             </p>
           )}
+          <div className="mt-2 grid gap-2 rounded-lg bg-slate-50 p-2 dark:bg-slate-950/50 sm:grid-cols-2 lg:grid-cols-4">
+            <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-400">{rentalText(language, 'Check-in', 'Arrivée')}</span><select disabled={!canManage} value={b.operations?.checkInStatus || 'pending'} onChange={(event) => updateStayOperations(b, { checkInStatus: event.target.value as NonNullable<NonNullable<RentalBooking['operations']>['checkInStatus']> })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-900"><option value="pending">Pending</option><option value="ready">Ready</option><option value="completed">Completed</option></select></label>
+            <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-400">{rentalText(language, 'Cleaning', 'Ménage')}</span><select disabled={!canManage} value={b.operations?.cleaningStatus || 'unassigned'} onChange={(event) => updateStayOperations(b, { cleaningStatus: event.target.value as NonNullable<NonNullable<RentalBooking['operations']>['cleaningStatus']> })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-900"><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="in_progress">In progress</option><option value="completed">Completed</option></select></label>
+            <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-400">{rentalText(language, 'Check-out', 'Départ')}</span><select disabled={!canManage} value={b.operations?.checkOutStatus || 'pending'} onChange={(event) => updateStayOperations(b, { checkOutStatus: event.target.value as NonNullable<NonNullable<RentalBooking['operations']>['checkOutStatus']> })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-900"><option value="pending">Pending</option><option value="completed">Completed</option></select></label>
+            <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-400">{rentalText(language, 'Assigned to', 'Assigné à')}</span><input disabled={!canManage} defaultValue={b.operations?.assignedTo || ''} onBlur={(event) => { if (event.target.value !== (b.operations?.assignedTo || '')) void updateStayOperations(b, { assignedTo: event.target.value }); }} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-900" /></label>
+          </div>
           <div className="flex items-center gap-2 mt-3 pt-2 border-t border-slate-100 dark:border-slate-800">
             <select
               value={b.status}
@@ -5097,6 +5622,7 @@ function RentalBookingList({
           {editingBookingId === b.id && (
             <RentalBookingEditor
               booking={b}
+              existingBookings={bookings}
               project={project}
               language={language}
               onCancel={() => setEditingBookingId(null)}
@@ -5147,20 +5673,23 @@ function RentalBookingPayments({
   onPrepareReceipt: (booking: RentalBooking, payment: RentalBookingPayment) => void;
   onRequestConfirm: (request: ConfirmRequest) => void;
 }) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = appDateKey();
   const [amount, setAmount] = useState(0);
   const [date, setDate] = useState(today);
   const [method, setMethod] = useState<RentalPaymentMethod>('cash');
   const [notes, setNotes] = useState('');
   const [prepareReceipt, setPrepareReceipt] = useState(true);
+  const [refundAmount, setRefundAmount] = useState(0);
+  const [refundReason, setRefundReason] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const guestTotal = rentalBookingGuestTotal(booking);
   const paid = rentalBookingPaidAmount(booking);
   const balance = rentalBookingBalanceDue(booking);
   const overpayment = rentalBookingOverpayment(booking);
   const validAmount = Math.max(0, Number(amount) || 0);
   const projectedPaid = paid + validAmount;
-  const projectedBalance = Math.max(0, booking.totalAmount - projectedPaid);
+  const projectedBalance = Math.max(0, guestTotal - projectedPaid);
 
   const savePayment = async () => {
     if (!date || validAmount <= 0 || validAmount > balance) return;
@@ -5203,10 +5732,30 @@ function RentalBookingPayments({
     });
   };
 
+  const saveRefund = async () => {
+    const validRefund = Math.max(0, Number(refundAmount) || 0);
+    if (!date || validRefund <= 0 || validRefund > paid) return;
+    setSaving(true);
+    const refund: RentalRefund = { id: `refund_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, date, amount: validRefund, reason: refundReason.trim() || undefined, method, recordedAt: new Date().toISOString() };
+    try {
+      await onSave(addRentalBookingRefund(booking, refund));
+      setRefundAmount(0);
+      setRefundReason('');
+    } finally { setSaving(false); }
+  };
+
+  const removeRefund = (refund: RentalRefund) => onRequestConfirm({
+    title: rentalText(language, 'Remove this refund?', 'Supprimer ce remboursement ?'),
+    message: `${refund.amount} ${project.currency} · ${refund.date}`,
+    confirmLabel: rentalText(language, 'Remove refund', 'Supprimer'),
+    variant: 'danger',
+    onConfirm: () => onSave(removeRentalBookingRefund(booking, refund.id)),
+  });
+
   return (
     <div className="mt-3 overflow-hidden rounded-lg border border-emerald-200 bg-emerald-50/40 dark:border-emerald-900/60 dark:bg-emerald-950/15">
       <div className="grid grid-cols-2 divide-x divide-y divide-emerald-100 sm:grid-cols-4 sm:divide-y-0 dark:divide-emerald-900/50">
-        <PaymentMetric label={rentalText(language, 'Booking total', 'Total séjour')} value={`${booking.totalAmount} ${project.currency}`} />
+        <PaymentMetric label={rentalText(language, 'Guest total', 'Total client')} value={`${guestTotal} ${project.currency}`} />
         <PaymentMetric label={rentalText(language, 'Paid to date', 'Déjà payé')} value={`${paid} ${project.currency}`} accent="text-emerald-700 dark:text-emerald-300" />
         <PaymentMetric label={rentalText(language, 'Payment due', 'À encaisser')} value={`${balance} ${project.currency}`} accent={balance > 0 ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'} />
         <PaymentMetric label={rentalText(language, 'After this payment', 'Après ce paiement')} value={`${projectedBalance} ${project.currency}`} />
@@ -5253,7 +5802,14 @@ function RentalBookingPayments({
         </div>
       </div>
 
-      {(booking.payments?.length || rentalBookingOpeningBalance(booking) > 0) && (
+      <div className="grid gap-2 border-t border-emerald-100 bg-white/50 p-3 dark:border-emerald-900/50 dark:bg-slate-950/20 sm:grid-cols-[8rem_8rem_minmax(0,1fr)_auto]">
+        <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Refund amount', 'Remboursement')}</span><input type="number" min={0} max={paid} step="any" value={refundAmount || ''} onChange={(event) => setRefundAmount(Math.max(0, Number(event.target.value) || 0))} className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+        <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Date', 'Date')}</span><DatePickerInput value={date} onChange={setDate} ariaLabel={rentalText(language, 'Refund date', 'Date remboursement')} /></label>
+        <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Reason', 'Motif')}</span><input value={refundReason} onChange={(event) => setRefundReason(event.target.value)} className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+        <button type="button" disabled={saving || refundAmount <= 0 || refundAmount > paid} onClick={saveRefund} className="h-9 self-end rounded-md border border-rose-300 px-3 text-xs font-bold text-rose-700 disabled:opacity-50 dark:border-rose-800 dark:text-rose-300">{rentalText(language, 'Record refund', 'Enregistrer remboursement')}</button>
+      </div>
+
+      {(booking.payments?.length || booking.refunds?.length || rentalBookingOpeningBalance(booking) > 0) && (
         <div className="border-t border-emerald-100 px-3 py-2 dark:border-emerald-900/50">
           <p className="mb-2 text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Payment history', 'Historique des paiements')}</p>
           <div className="space-y-1.5">
@@ -5280,6 +5836,7 @@ function RentalBookingPayments({
                 </div>
               </div>
             ))}
+            {(booking.refunds || []).map((refund) => <div key={refund.id} className="flex items-center justify-between rounded-md bg-rose-50 px-2.5 py-2 text-[10px] dark:bg-rose-950/20"><span><strong>-{refund.amount} {project.currency}</strong> · {refund.date}{refund.reason ? ` · ${refund.reason}` : ''}</span><button type="button" onClick={() => removeRefund(refund)} className="rounded p-1 text-rose-500 hover:bg-rose-100 dark:hover:bg-rose-950"><Trash2 className="h-3.5 w-3.5" /></button></div>)}
           </div>
         </div>
       )}
@@ -5298,12 +5855,14 @@ function PaymentMetric({ label, value, accent = 'text-slate-900 dark:text-white'
 
 function RentalBookingEditor({
   booking,
+  existingBookings,
   project,
   language,
   onCancel,
   onSave,
 }: {
   booking: RentalBooking;
+  existingBookings: RentalBooking[];
   project: Project;
   language: Language;
   onCancel: () => void;
@@ -5317,11 +5876,38 @@ function RentalBookingEditor({
     commissionRate: rentalBookingCommissionRate(booking, project),
     cleaningFee: booking.cleaningFee || 0,
     cleaningChargeTo: booking.cleaningChargeTo || 'owner',
+    securityDeposit: booking.securityDeposit || 0,
+    channelFee: booking.channelFee || 0,
+    taxAmount: booking.taxAmount || 0,
+    cancellationFee: booking.cancellationFee || 0,
   });
   const [saving, setSaving] = useState(false);
+  const [bookingError, setBookingError] = useState('');
 
   const save = async () => {
-    if (!draft.clientName.trim() || !draft.checkIn || !draft.checkOut || draft.checkOut <= draft.checkIn) return;
+    if (!draft.clientName.trim() || !draft.checkIn || !draft.checkOut || draft.checkOut <= draft.checkIn) {
+      setBookingError(
+        rentalText(language, 'Check-out must be after check-in.', 'Le depart doit etre apres l arrivee.')
+      );
+      return;
+    }
+    const conflictingBooking = findRentalBookingConflict(
+      existingBookings,
+      draft.checkIn,
+      draft.checkOut,
+      booking.id
+    );
+    if (conflictingBooking) {
+      setBookingError(
+        rentalText(
+          language,
+          `These dates overlap ${conflictingBooking.clientName}'s booking (${conflictingBooking.checkIn} - ${conflictingBooking.checkOut}).`,
+          `Ces dates chevauchent la reservation de ${conflictingBooking.clientName} (${conflictingBooking.checkIn} - ${conflictingBooking.checkOut}).`
+        )
+      );
+      return;
+    }
+    setBookingError('');
     setSaving(true);
     const totalNights = Math.max(1, Math.round(
       (new Date(`${draft.checkOut}T12:00:00`).getTime() - new Date(`${draft.checkIn}T12:00:00`).getTime()) / 86_400_000
@@ -5330,24 +5916,31 @@ function RentalBookingEditor({
     const commissionRate = Math.max(0, draft.commissionRate);
     const commission = Math.round(totalAmount * commissionRate) / 100;
     const ownerCleaning = draft.cleaningChargeTo === 'owner' ? Math.max(0, draft.cleaningFee) : 0;
-    await onSave(syncRentalBookingPaymentTotals({
-      ...booking,
-      clientName: draft.clientName.trim(),
-      checkIn: draft.checkIn,
-      checkOut: draft.checkOut,
-      totalNights,
-      nightlyRate: Math.max(0, draft.nightlyRate),
-      totalAmount,
-      commissionRate,
-      commission,
-      cleaningFee: Math.max(0, draft.cleaningFee),
-      cleaningChargeTo: draft.cleaningChargeTo as NonNullable<RentalBooking['cleaningChargeTo']>,
-      ownerPayout: Math.round((totalAmount - commission - ownerCleaning) * 100) / 100,
-      status: booking.status === 'cancelled'
-        ? 'cancelled'
-        : rentalBookingStatusForDates(draft.checkIn, draft.checkOut),
-    }));
-    setSaving(false);
+    try {
+      await onSave(syncRentalBookingPaymentTotals({
+        ...booking,
+        clientName: draft.clientName.trim(),
+        checkIn: draft.checkIn,
+        checkOut: draft.checkOut,
+        totalNights,
+        nightlyRate: Math.max(0, draft.nightlyRate),
+        totalAmount,
+        commissionRate,
+        commission,
+        cleaningFee: Math.max(0, draft.cleaningFee),
+        cleaningChargeTo: draft.cleaningChargeTo as NonNullable<RentalBooking['cleaningChargeTo']>,
+        securityDeposit: Math.max(0, draft.securityDeposit),
+        channelFee: Math.max(0, draft.channelFee),
+        taxAmount: Math.max(0, draft.taxAmount),
+        cancellationFee: Math.max(0, draft.cancellationFee),
+        ownerPayout: Math.round((totalAmount - commission - ownerCleaning - Math.max(0, draft.channelFee)) * 100) / 100,
+        status: booking.status === 'cancelled'
+          ? 'cancelled'
+          : rentalBookingStatusForDates(draft.checkIn, draft.checkOut),
+      }));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -5359,6 +5952,11 @@ function RentalBookingEditor({
       <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">Commission %</span><input type="number" min={0} max={100} step="any" value={draft.commissionRate} onChange={(event) => setDraft({ ...draft, commissionRate: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
       <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Cleaning', 'Ménage')}</span><input type="number" min={0} step="any" value={draft.cleaningFee} onChange={(event) => setDraft({ ...draft, cleaningFee: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
       <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Cleaning paid by', 'Ménage payé par')}</span><select value={draft.cleaningChargeTo} onChange={(event) => setDraft({ ...draft, cleaningChargeTo: event.target.value as typeof draft.cleaningChargeTo })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950"><option value="owner">{rentalText(language, 'Owner', 'Propriétaire')}</option><option value="guest">{rentalText(language, 'Guest', 'Client')}</option><option value="management">{rentalText(language, 'Management', 'Société')}</option></select></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Deposit', 'Dépôt')}</span><input type="number" min={0} step="any" value={draft.securityDeposit} onChange={(event) => setDraft({ ...draft, securityDeposit: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Channel fee', 'Frais plateforme')}</span><input type="number" min={0} step="any" value={draft.channelFee} onChange={(event) => setDraft({ ...draft, channelFee: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Taxes', 'Taxes')}</span><input type="number" min={0} step="any" value={draft.taxAmount} onChange={(event) => setDraft({ ...draft, taxAmount: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Cancellation fee', 'Frais annulation')}</span><input type="number" min={0} step="any" value={draft.cancellationFee} onChange={(event) => setDraft({ ...draft, cancellationFee: Math.max(0, Number(event.target.value) || 0) })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-right font-mono text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
+      {bookingError && <p className="col-span-2 text-[10px] font-semibold text-red-600 dark:text-red-400 sm:col-span-4">{bookingError}</p>}
       <div className="col-span-2 flex justify-end gap-2 sm:col-span-4"><button type="button" onClick={onCancel} className="h-8 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold dark:border-slate-800 dark:bg-slate-950">{rentalText(language, 'Cancel', 'Annuler')}</button><button type="button" disabled={saving} onClick={save} className="h-8 rounded-md bg-purple-600 px-3 text-xs font-bold text-white disabled:opacity-60">{saving ? '...' : (rentalText(language, 'Save changes', 'Enregistrer'))}</button></div>
     </div>
   );

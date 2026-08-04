@@ -20,7 +20,9 @@ import {
   addRentalBookingPayment,
   rentalBookingBalanceDue,
   syncRentalBookingPaymentTotals,
+  findRentalBookingConflict,
 } from './rentalAccounting';
+import { appDateKey, appDateKeyAfterDays } from './dateTime';
 
 export type AIActionType =
   | 'add_expense'
@@ -323,7 +325,7 @@ export function applyAIAction(
         amount,
         currency: project.currency,
         category: normalizeCategory(p.category),
-        date: String(p.date || new Date().toISOString().split('T')[0]),
+        date: String(p.date || appDateKey()),
         paidBy: String(p.paidBy || email),
         supplier: String(p.supplier || ''),
         receipts: [],
@@ -408,7 +410,7 @@ export function applyAIAction(
         : 'medium';
       const deadline = validDate(p.deadline)
         ? String(p.deadline)
-        : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        : appDateKeyAfterDays(7);
       const newTask: Task = {
         id: aiId('tsk_ai'),
         title: String(p.title),
@@ -516,6 +518,17 @@ export function applyAIAction(
       if (!clientName || !validDate(checkIn) || !validDate(checkOut) || checkOut <= checkIn) {
         return { project, error: 'Invalid booking: client, check-in, and later check-out are required' };
       }
+      const conflictingBooking = findRentalBookingConflict(
+        project.rentalBookings || [],
+        checkIn,
+        checkOut
+      );
+      if (conflictingBooking) {
+        return {
+          project,
+          error: `Booking dates overlap ${conflictingBooking.clientName} (${conflictingBooking.checkIn} - ${conflictingBooking.checkOut})`,
+        };
+      }
       const totalNights = rentalDaysBetween(checkIn, checkOut);
       const nightlyRate = Math.max(0, Number(p.nightlyRate) || project.rentalProperty.pricePerNight || 0);
       const suppliedTotal = Number(p.totalAmount);
@@ -533,7 +546,7 @@ export function applyAIAction(
       const initialPayment: RentalBookingPayment | null = paidAmount > 0
         ? {
             id: aiId('payment_ai'),
-            date: String(p.paymentDate || new Date().toISOString().split('T')[0]),
+            date: String(p.paymentDate || appDateKey()),
             amount: paidAmount,
             method: ['cash', 'bank_transfer', 'card', 'online', 'other'].includes(String(p.paymentMethod))
               ? p.paymentMethod as RentalBookingPayment['method']
@@ -603,6 +616,18 @@ export function applyAIAction(
       if (!validDate(checkIn) || !validDate(checkOut) || checkOut <= checkIn) {
         return { project, error: 'Booking dates are invalid' };
       }
+      const conflictingBooking = findRentalBookingConflict(
+        project.rentalBookings || [],
+        checkIn,
+        checkOut,
+        booking.id
+      );
+      if (conflictingBooking) {
+        return {
+          project,
+          error: `Booking dates overlap ${conflictingBooking.clientName} (${conflictingBooking.checkIn} - ${conflictingBooking.checkOut})`,
+        };
+      }
       const totalNights = rentalDaysBetween(checkIn, checkOut);
       const nightlyRate =
         p.nightlyRate === undefined
@@ -661,7 +686,7 @@ export function applyAIAction(
       if (!booking) return { project, error: 'Booking not found' };
       const p = action.params;
       const amount = Math.max(0, Number(p.amount) || 0);
-      const date = String(p.date || new Date().toISOString().split('T')[0]);
+      const date = String(p.date || appDateKey());
       const balance = rentalBookingBalanceDue(booking);
       if (!amount || amount > balance || !validDate(date)) {
         return { project, error: `Payment must be positive and no more than the ${balance} balance` };
@@ -701,7 +726,7 @@ export function applyAIAction(
       }
       const p = action.params;
       const amount = Math.max(0, Number(p.amount) || 0);
-      const date = String(p.date || new Date().toISOString().split('T')[0]);
+      const date = String(p.date || appDateKey());
       if (!amount || !validDate(date)) {
         return { project, error: 'Owner payment requires a positive amount and valid date' };
       }

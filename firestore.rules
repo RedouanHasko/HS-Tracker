@@ -72,6 +72,9 @@ service cloud.firestore {
           && ('photos' in data ? data.photos is list && data.photos.size() <= 500 : true)
           && ('rentalBookings' in data ? data.rentalBookings is list && data.rentalBookings.size() <= 1000 : true)
           && ('rentalOwnerPayments' in data ? data.rentalOwnerPayments is list && data.rentalOwnerPayments.size() <= 1000 : true)
+          && ('storageVersion' in data ? data.storageVersion == 1 || data.storageVersion == 2 : true)
+          && ('recordRevision' in data ? valString(data.recordRevision, 50) : true)
+          && ('recordCounts' in data ? data.recordCounts is map : true)
           && ('rentalProperty' in data ? isValidRentalProperty(data.rentalProperty) : true);
     }
 
@@ -187,6 +190,17 @@ service cloud.firestore {
           );
     }
 
+    function isVersionedRecordHeartbeatPatch() {
+      let patchKeys = request.resource.data.diff(resource.data).affectedKeys();
+      return resource.data.get('storageVersion', 1) == 2
+          && request.resource.data.get('storageVersion', 1) == 2
+          && membersArrayUnchanged()
+          && projectSettingsUnchanged()
+          && reimbursementsUnchanged()
+          && rentalSettingsUnchanged()
+          && patchKeys.hasOnly(['recordRevision', 'recordCounts']);
+    }
+
     function isAcceptedProjectMember(projectData) {
       return projectData != null && (
         ('creatorEmail' in projectData && projectData.creatorEmail.lower() == userEmail()) ||
@@ -207,6 +221,14 @@ service cloud.firestore {
     function isInviteeMembershipPatch() {
       let patchKeys = request.resource.data.diff(resource.data).affectedKeys();
       return isInvitedToProject(resource.data)
+          && request.resource.data.get('memberRoleByEmail', {})
+            == resource.data.get('memberRoleByEmail', {})
+          && !(userEmail() in request.resource.data.get('invitedEmails', []))
+          && (
+            userEmail() in request.resource.data.get('memberEmails', [])
+            || request.resource.data.get('memberEmails', [])
+              == resource.data.get('memberEmails', [])
+          )
           && (
             patchKeys.hasOnly(['members', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
             || patchKeys.hasOnly(['members', 'memberRoleByEmail', 'invitedEmails'])
@@ -218,7 +240,29 @@ service cloud.firestore {
       let level = roleLevel(role);
       return isAdminRole(role)
         || isInviteeMembershipPatch()
-        || (level >= 1 && isContributorContentPatch());
+        || (
+          level >= 1
+          && (
+            (
+              resource.data.get('storageVersion', 1) == 2
+              && isVersionedRecordHeartbeatPatch()
+            )
+            || (
+              resource.data.get('storageVersion', 1) != 2
+              && isContributorContentPatch()
+            )
+          )
+        );
+    }
+
+    function storageVersionTransitionAllowed() {
+      return request.resource.data.get('storageVersion', 1)
+            == resource.data.get('storageVersion', 1)
+        || (
+          resource.data.get('storageVersion', 1) != 2
+          && request.resource.data.get('storageVersion', 1) == 2
+          && resource.data.creatorEmail.lower() == userEmail()
+        );
     }
 
     function callerRoleByProjectId(projectId) {
@@ -228,6 +272,142 @@ service cloud.firestore {
 
     function canWriteTaskMedia(projectId) {
       return roleLevel(callerRoleByProjectId(projectId)) >= 1;
+    }
+
+    function callerRoleByProjectIdAfter(projectId) {
+      let project = getAfter(/databases/$(database)/documents/projects/$(projectId));
+      return project != null ? callerRole(project.data) : 'read_only';
+    }
+
+    function isValidProjectRecord(data, projectId) {
+      return data is map
+          && data.projectId == projectId
+          && valString(data.entityId, 128)
+          && data.kind in [
+            'section',
+            'expense',
+            'task',
+            'photo',
+            'document',
+            'reimbursement',
+            'rental_booking',
+            'rental_owner_payment',
+            'rental_calendar_block',
+            'rental_owner_statement',
+            'contact',
+            'construction_funding',
+            'construction_change_order',
+            'construction_purchase_order',
+            'construction_site_log',
+            'construction_budget_commitment'
+          ]
+          && data.payload is map
+          && valString(data.updatedAt, 50)
+          && valString(data.updatedBy, 200)
+          && data.updatedBy.lower() == userEmail();
+    }
+
+    function contributorCanWriteRecordKind(kind) {
+      return kind in [
+        'section',
+        'expense',
+        'task',
+        'photo',
+        'document',
+        'rental_booking',
+        'rental_calendar_block',
+        'contact',
+        'construction_change_order',
+        'construction_site_log'
+      ];
+    }
+
+    function canWriteProjectRecord(projectId, recordData) {
+      let role = callerRoleByProjectIdAfter(projectId);
+      return isAdminRole(role)
+          || (roleLevel(role) >= 1 && contributorCanWriteRecordKind(recordData.kind));
+    }
+
+    function canDeleteProjectRecord(projectId, recordData) {
+      let role = callerRoleByProjectId(projectId);
+      return isAdminRole(role)
+          || (roleLevel(role) >= 1 && contributorCanWriteRecordKind(recordData.kind));
+    }
+
+    function isValidProjectTrash(data, projectId) {
+      return data is map
+          && data.projectId == projectId
+          && valString(data.entityId, 128)
+          && data.kind in [
+            'section',
+            'expense',
+            'task',
+            'photo',
+            'document',
+            'reimbursement',
+            'rental_booking',
+            'rental_owner_payment',
+            'rental_calendar_block',
+            'rental_owner_statement',
+            'contact',
+            'construction_funding',
+            'construction_change_order',
+            'construction_purchase_order',
+            'construction_site_log',
+            'construction_budget_commitment'
+          ]
+          && data.payload is map
+          && valString(data.updatedAt, 50)
+          && valString(data.updatedBy, 200)
+          && valString(data.deletedAt, 50)
+          && valString(data.deletedBy, 200)
+          && data.deletedBy.lower() == userEmail();
+    }
+
+    function isValidGeneratedDocument(data, projectId) {
+      return data is map
+          && data.projectId == projectId
+          && valString(data.id, 128)
+          && valString(data.number, 80)
+          && data.kind in ['invoice', 'voucher', 'receipt']
+          && data.status in ['draft', 'finalized', 'paid', 'cancelled']
+          && data.version is int && data.version >= 1 && data.version <= 10000
+          && data.items is list && data.items.size() > 0 && data.items.size() <= 200
+          && data.visibleColumns is list && data.visibleColumns.size() <= 3
+          && data.taxRate is number && data.taxRate >= 0 && data.taxRate <= 100
+          && data.subtotal is number && data.subtotal >= 0
+          && data.total is number && data.total >= 0
+          && valString(data.createdAt, 50)
+          && valString(data.createdBy, 200)
+          && valString(data.updatedAt, 50)
+          && valString(data.updatedBy, 200)
+          && data.updatedBy.lower() == userEmail();
+    }
+
+    function isValidDocumentCounter(data, projectId) {
+      return data is map
+          && data.projectId == projectId
+          && data.kind in ['invoice', 'voucher', 'receipt']
+          && data.year is int && data.year >= 2000 && data.year <= 2200
+          && data.nextNumber is int && data.nextNumber >= 1
+          && valString(data.updatedAt, 50)
+          && valString(data.updatedBy, 200)
+          && data.updatedBy.lower() == userEmail();
+    }
+
+    function isValidAIUndoEntry(data, projectId) {
+      return data is map
+          && data.projectId == projectId
+          && valString(data.id, 128)
+          && valString(data.createdAt, 50)
+          && valString(data.createdBy, 200)
+          && data.createdBy.lower() == userEmail()
+          && data.previousRootValues is map
+          && data.missingRootKeys is list && data.missingRootKeys.size() <= 50
+          && data.recordChanges is list && data.recordChanges.size() <= 100
+          && (data.previousRootValues.size() > 0
+              || data.missingRootKeys.size() > 0
+              || data.recordChanges.size() > 0);
     }
 
     // Invitations: owner or target invitee
@@ -261,13 +441,92 @@ service cloud.firestore {
           && request.resource.data.memberRoleByEmail[userEmail()] == 'owner'
           && isValidProject(request.resource.data);
           
-      allow update: if isSignedIn() && isProjectMember(resource.data)
+      allow update: if isSignedIn()
+          && (isProjectMember(resource.data) || isInvitedToProject(resource.data))
           && request.resource.data.creatorEmail.lower() == resource.data.creatorEmail.lower()
           && isValidProject(request.resource.data)
           && ownerAccessPreserved()
+          && storageVersionTransitionAllowed()
           && canUpdateProjectByRole();
           
       allow delete: if isSignedIn() && resource.data.creatorEmail.lower() == userEmail();
+
+      match /records/{recordId} {
+        allow read: if isSignedIn() && isAcceptedMemberByProjectId(projectId);
+        allow create: if isSignedIn()
+            && valString(recordId, 300)
+            && isValidProjectRecord(request.resource.data, projectId)
+            && canWriteProjectRecord(projectId, request.resource.data);
+        allow update: if isSignedIn()
+            && isValidProjectRecord(request.resource.data, projectId)
+            && request.resource.data.projectId == resource.data.projectId
+            && request.resource.data.kind == resource.data.kind
+            && request.resource.data.entityId == resource.data.entityId
+            && canWriteProjectRecord(projectId, request.resource.data);
+        allow delete: if isSignedIn()
+            && canDeleteProjectRecord(projectId, resource.data);
+      }
+
+      match /trash/{trashId} {
+        allow read: if isSignedIn() && isAcceptedMemberByProjectId(projectId);
+        allow create: if isSignedIn()
+            && valString(trashId, 300)
+            && isValidProjectTrash(request.resource.data, projectId)
+            && canWriteProjectRecord(projectId, request.resource.data);
+        allow update: if false;
+        allow delete: if isSignedIn()
+            && isAdminRole(callerRoleByProjectId(projectId));
+      }
+
+      match /generated_documents/{documentId} {
+        allow read: if isSignedIn() && isAcceptedMemberByProjectId(projectId);
+        allow create: if isSignedIn()
+            && isValidId(documentId)
+            && isValidGeneratedDocument(request.resource.data, projectId)
+            && roleLevel(callerRoleByProjectIdAfter(projectId)) >= 1;
+        allow update: if isSignedIn()
+            && isValidGeneratedDocument(request.resource.data, projectId)
+            && request.resource.data.id == resource.data.id
+            && request.resource.data.projectId == resource.data.projectId
+            && request.resource.data.kind == resource.data.kind
+            && request.resource.data.number == resource.data.number
+            && request.resource.data.createdAt == resource.data.createdAt
+            && request.resource.data.createdBy == resource.data.createdBy
+            && request.resource.data.version == resource.data.version + 1
+            && roleLevel(callerRoleByProjectIdAfter(projectId)) >= 1;
+        allow delete: if false;
+      }
+
+      match /document_counters/{counterId} {
+        allow read: if isSignedIn() && isAcceptedMemberByProjectId(projectId);
+        allow create: if isSignedIn()
+            && isValidId(counterId)
+            && isValidDocumentCounter(request.resource.data, projectId)
+            && request.resource.data.nextNumber == 1
+            && roleLevel(callerRoleByProjectIdAfter(projectId)) >= 1;
+        allow update: if isSignedIn()
+            && isValidDocumentCounter(request.resource.data, projectId)
+            && request.resource.data.projectId == resource.data.projectId
+            && request.resource.data.kind == resource.data.kind
+            && request.resource.data.year == resource.data.year
+            && request.resource.data.nextNumber == resource.data.nextNumber + 1
+            && roleLevel(callerRoleByProjectIdAfter(projectId)) >= 1;
+        allow delete: if false;
+      }
+
+      match /ai_undo/{entryId} {
+        allow read: if isSignedIn() && isAcceptedMemberByProjectId(projectId);
+        allow create: if isSignedIn()
+            && isValidId(entryId)
+            && isValidAIUndoEntry(request.resource.data, projectId)
+            && request.resource.data.id == entryId
+            && roleLevel(callerRoleByProjectIdAfter(projectId)) >= 1;
+        allow update: if false;
+        allow delete: if isSignedIn()
+            && isAcceptedMemberByProjectId(projectId)
+            && (resource.data.createdBy.lower() == userEmail()
+                || isAdminRole(callerRoleByProjectId(projectId)));
+      }
     }
 
     // 3. Invitations

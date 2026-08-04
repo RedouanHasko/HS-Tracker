@@ -265,6 +265,58 @@ test('AI creates the reported Hussein booking from a nightly rate', () => {
   assert.equal(created.project.rentalBookings?.[0].totalAmount, 6400);
 });
 
+test('AI refuses overlapping booking creation and date updates', () => {
+  const first = applyAIAction(
+    project,
+    action('add_booking', {
+      clientName: 'First Guest',
+      checkIn: '2026-08-10',
+      checkOut: '2026-08-14',
+      totalAmount: 2000,
+    }),
+    ctx
+  );
+  assert.equal(first.error, undefined);
+
+  const overlapping = applyAIAction(
+    first.project,
+    action('add_booking', {
+      clientName: 'Second Guest',
+      checkIn: '2026-08-13',
+      checkOut: '2026-08-16',
+      totalAmount: 1500,
+    }),
+    ctx
+  );
+  assert.match(overlapping.error || '', /overlap First Guest/);
+  assert.equal(overlapping.project.rentalBookings?.length, 1);
+
+  const adjacent = applyAIAction(
+    first.project,
+    action('add_booking', {
+      clientName: 'Adjacent Guest',
+      checkIn: '2026-08-14',
+      checkOut: '2026-08-16',
+      totalAmount: 1000,
+    }),
+    ctx
+  );
+  assert.equal(adjacent.error, undefined);
+
+  const adjacentId = adjacent.project.rentalBookings![1].id;
+  const conflictingUpdate = applyAIAction(
+    adjacent.project,
+    action('update_booking', {
+      bookingId: adjacentId,
+      newCheckIn: '2026-08-12',
+      newCheckOut: '2026-08-16',
+    }),
+    ctx
+  );
+  assert.match(conflictingUpdate.error || '', /overlap First Guest/);
+  assert.equal(conflictingUpdate.project.rentalBookings?.[1].checkIn, '2026-08-14');
+});
+
 test('Darija booking request becomes a real structured action without relying on Gemini JSON', () => {
   const rental = {
     ...project,

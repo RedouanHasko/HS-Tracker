@@ -7,6 +7,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import {
   collection,
+  deleteField,
   deleteDoc,
   doc,
   getDoc,
@@ -17,6 +18,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 
 const projectId = 'project_rules_test';
@@ -105,6 +107,258 @@ test('contributors can update content but cannot rewrite access lists', async ()
   await assertFails(updateDoc(contributorRef, {
     rentalOwnerPayments: [{ id: 'payment', date: '2026-07-29', amount: 1000 }],
   }));
+});
+
+test('versioned project records inherit access and preserve role boundaries', async () => {
+  const ownerDb = context('owner', ownerEmail).firestore();
+  const managerDb = context('manager', managerEmail).firestore();
+  const contributorDb = context('contributor', contributorEmail).firestore();
+  const pendingDb = context('pending', inviteeEmail).firestore();
+  const outsiderDb = context('outsider', 'outsider@example.com').firestore();
+  const ownerRef = projectRef(context('owner', ownerEmail));
+
+  await assertSucceeds(updateDoc(ownerRef, {
+    storageVersion: 2,
+    recordRevision: '2026-07-31T12:00:00.000Z',
+    recordCounts: { task: 0 },
+  }));
+  await assertSucceeds(updateDoc(projectRef(context('contributor', contributorEmail)), {
+    recordRevision: '2026-07-31T12:01:00.000Z',
+    recordCounts: { task: 1 },
+  }));
+
+  const taskRecord = {
+    projectId,
+    kind: 'task',
+    entityId: 'task-v2',
+    payload: { id: 'task-v2', title: 'Allowed task' },
+    updatedAt: '2026-07-31T12:01:00.000Z',
+    updatedBy: contributorEmail,
+  };
+  const taskRef = doc(contributorDb, 'projects', projectId, 'records', 'task__task-v2');
+  await assertSucceeds(setDoc(taskRef, taskRecord));
+  await assertSucceeds(getDoc(doc(managerDb, 'projects', projectId, 'records', 'task__task-v2')));
+  await assertFails(getDoc(doc(pendingDb, 'projects', projectId, 'records', 'task__task-v2')));
+  await assertFails(getDoc(doc(outsiderDb, 'projects', projectId, 'records', 'task__task-v2')));
+  await assertFails(updateDoc(projectRef(context('pending', inviteeEmail)), {
+    memberEmails: [...projectFixture().memberEmails, inviteeEmail],
+    memberRoleByEmail: {
+      ...projectFixture().memberRoleByEmail,
+      [inviteeEmail]: 'manager',
+    },
+    invitedEmails: [],
+  }));
+  await assertSucceeds(updateDoc(projectRef(context('pending', inviteeEmail)), {
+    members: projectFixture().members.map((member) =>
+      member.email === inviteeEmail ? { ...member, status: 'accepted' } : member
+    ),
+    memberEmails: [...projectFixture().memberEmails, inviteeEmail],
+    memberRoleByEmail: projectFixture().memberRoleByEmail,
+    invitedEmails: [],
+  }));
+  await assertSucceeds(getDoc(doc(pendingDb, 'projects', projectId, 'records', 'task__task-v2')));
+
+  await assertFails(setDoc(
+    doc(contributorDb, 'projects', projectId, 'records', 'owner-payment'),
+    {
+      ...taskRecord,
+      kind: 'rental_owner_payment',
+      entityId: 'owner-payment',
+      payload: { id: 'owner-payment', amount: 1000 },
+    }
+  ));
+  await assertSucceeds(setDoc(
+    doc(managerDb, 'projects', projectId, 'records', 'owner-payment'),
+    {
+      ...taskRecord,
+      kind: 'rental_owner_payment',
+      entityId: 'owner-payment',
+      payload: { id: 'owner-payment', amount: 1000 },
+      updatedBy: managerEmail,
+    }
+  ));
+  await assertFails(setDoc(
+    doc(contributorDb, 'projects', projectId, 'records', 'spoofed-task'),
+    { ...taskRecord, entityId: 'spoofed-task', updatedBy: ownerEmail }
+  ));
+  await assertSucceeds(deleteDoc(taskRef));
+
+  const deleteBatch = writeBatch(ownerDb);
+  deleteBatch.delete(doc(ownerDb, 'projects', projectId, 'records', 'owner-payment'));
+  deleteBatch.delete(doc(ownerDb, 'projects', projectId));
+  await assertSucceeds(deleteBatch.commit());
+});
+
+test('new operational records enforce contributor and manager boundaries', async () => {
+  const contributorDb = context('contributor', contributorEmail).firestore();
+  const managerDb = context('manager', managerEmail).firestore();
+  const base = { projectId, entityId: 'record', payload: { id: 'record' }, updatedAt: '2026-08-01T10:00:00Z' };
+
+  for (const kind of ['rental_calendar_block', 'contact', 'construction_change_order', 'construction_site_log']) {
+    await assertSucceeds(setDoc(doc(contributorDb, 'projects', projectId, 'records', `${kind}__record`), { ...base, kind, updatedBy: contributorEmail }));
+  }
+  for (const kind of ['rental_owner_statement', 'construction_funding', 'construction_purchase_order', 'construction_budget_commitment']) {
+    await assertFails(setDoc(doc(contributorDb, 'projects', projectId, 'records', `${kind}__record`), { ...base, kind, updatedBy: contributorEmail }));
+    await assertSucceeds(setDoc(doc(managerDb, 'projects', projectId, 'records', `${kind}__record`), { ...base, kind, updatedBy: managerEmail }));
+  }
+});
+
+test('private contact directory is isolated by user id', async () => {
+  const ownerDb = context('owner', ownerEmail).firestore();
+  const outsiderDb = context('outsider', 'outsider@example.com').firestore();
+  const contactRef = doc(ownerDb, 'users', 'owner', 'contacts', 'contact-1');
+  await assertSucceeds(setDoc(contactRef, { id: 'contact-1', name: 'Client', updatedAt: '2026-08-01T10:00:00Z' }));
+  await assertSucceeds(getDoc(contactRef));
+  await assertFails(getDoc(doc(outsiderDb, 'users', 'owner', 'contacts', 'contact-1')));
+});
+
+test('a versioned project and its first records can be created atomically', async () => {
+  const ownerDb = context('owner-new', ownerEmail).firestore();
+  const newProjectId = 'project_rules_versioned_new';
+  const batch = writeBatch(ownerDb);
+  batch.set(doc(ownerDb, 'projects', newProjectId), {
+    ...projectFixture(),
+    id: newProjectId,
+    storageVersion: 2,
+    recordRevision: '2026-07-31T13:00:00.000Z',
+    recordCounts: { task: 1 },
+    sections: [],
+    expenses: [],
+    tasks: [],
+    photos: [],
+    documents: [],
+    reimbursements: [],
+    rentalBookings: [],
+  });
+  batch.set(doc(ownerDb, 'projects', newProjectId, 'records', 'task__initial'), {
+    projectId: newProjectId,
+    kind: 'task',
+    entityId: 'initial',
+    payload: { id: 'initial', title: 'Initial task' },
+    updatedAt: '2026-07-31T13:00:00.000Z',
+    updatedBy: ownerEmail,
+  });
+  await assertSucceeds(batch.commit());
+});
+
+test('only the creator can migrate legacy arrays to versioned records', async () => {
+  const managerDb = context('manager', managerEmail).firestore();
+  await assertFails(updateDoc(doc(managerDb, 'projects', projectId), {
+    storageVersion: 2,
+    recordRevision: '2026-07-31T14:00:00.000Z',
+    recordCounts: { task: 0 },
+  }));
+
+  const ownerDb = context('owner', ownerEmail).firestore();
+  const migration = writeBatch(ownerDb);
+  migration.update(doc(ownerDb, 'projects', projectId), {
+    storageVersion: 2,
+    recordRevision: '2026-07-31T14:01:00.000Z',
+    recordCounts: { task: 1 },
+    sections: deleteField(),
+    expenses: deleteField(),
+    tasks: deleteField(),
+    photos: deleteField(),
+    documents: deleteField(),
+    reimbursements: deleteField(),
+    rentalBookings: deleteField(),
+  });
+  migration.set(doc(ownerDb, 'projects', projectId, 'records', 'task__migrated'), {
+    projectId,
+    kind: 'task',
+    entityId: 'migrated',
+    payload: { id: 'migrated', title: 'Preserved task' },
+    updatedAt: '2026-07-31T14:01:00.000Z',
+    updatedBy: ownerEmail,
+  });
+  await assertSucceeds(migration.commit());
+});
+
+test('versioned record deletion creates recoverable trash with admin-only restore', async () => {
+  const ownerDb = context('owner', ownerEmail).firestore();
+  const contributorDb = context('contributor', contributorEmail).firestore();
+  const managerDb = context('manager', managerEmail).firestore();
+  const outsiderDb = context('outsider', 'outsider@example.com').firestore();
+  const revision = '2026-07-31T15:00:00.000Z';
+
+  await updateDoc(doc(ownerDb, 'projects', projectId), {
+    storageVersion: 2,
+    recordRevision: revision,
+    recordCounts: { task: 1 },
+  });
+  const activeRef = doc(ownerDb, 'projects', projectId, 'records', 'task__recoverable');
+  await setDoc(activeRef, {
+    projectId,
+    kind: 'task',
+    entityId: 'recoverable',
+    payload: { id: 'recoverable', title: 'Recover me' },
+    updatedAt: revision,
+    updatedBy: ownerEmail,
+  });
+
+  const deletedAt = '2026-07-31T15:01:00.000Z';
+  const contributorDelete = writeBatch(contributorDb);
+  contributorDelete.set(
+    doc(contributorDb, 'projects', projectId, 'trash', 'task__recoverable'),
+    {
+      projectId,
+      kind: 'task',
+      entityId: 'recoverable',
+      payload: { id: 'recoverable', title: 'Recover me' },
+      updatedAt: revision,
+      updatedBy: ownerEmail,
+      deletedAt,
+      deletedBy: contributorEmail,
+    }
+  );
+  contributorDelete.delete(
+    doc(contributorDb, 'projects', projectId, 'records', 'task__recoverable')
+  );
+  contributorDelete.update(doc(contributorDb, 'projects', projectId), {
+    recordRevision: deletedAt,
+    recordCounts: { task: 0 },
+  });
+  await assertSucceeds(contributorDelete.commit());
+
+  const contributorTrashRef = doc(
+    contributorDb,
+    'projects',
+    projectId,
+    'trash',
+    'task__recoverable'
+  );
+  await assertSucceeds(getDoc(contributorTrashRef));
+  await assertFails(getDoc(doc(
+    outsiderDb,
+    'projects',
+    projectId,
+    'trash',
+    'task__recoverable'
+  )));
+  await assertFails(deleteDoc(contributorTrashRef));
+
+  const restoredAt = '2026-07-31T15:02:00.000Z';
+  const managerRestore = writeBatch(managerDb);
+  managerRestore.set(doc(managerDb, 'projects', projectId, 'records', 'task__recoverable'), {
+    projectId,
+    kind: 'task',
+    entityId: 'recoverable',
+    payload: { id: 'recoverable', title: 'Recover me' },
+    updatedAt: restoredAt,
+    updatedBy: managerEmail,
+  });
+  managerRestore.delete(doc(
+    managerDb,
+    'projects',
+    projectId,
+    'trash',
+    'task__recoverable'
+  ));
+  managerRestore.update(doc(managerDb, 'projects', projectId), {
+    recordRevision: restoredAt,
+    recordCounts: { task: 1 },
+  });
+  await assertSucceeds(managerRestore.commit());
 });
 
 test('managers cannot remove or demote the project owner', async () => {
@@ -282,4 +536,98 @@ test('project gallery media is limited to accepted project writers', async () =>
   await assertFails(getDoc(
     doc(outsiderDb, 'project_task_media', 'gallery_media_accepted'),
   ));
+});
+
+test('generated documents use atomic counters, immutable numbers, and cancellation', async () => {
+  const contributorDb = context('contributor', contributorEmail).firestore();
+  const outsiderDb = context('outsider', 'outsider@example.com').firestore();
+  const counterRef = doc(contributorDb, 'projects', projectId, 'document_counters', 'invoice_2026');
+  const documentRef = doc(contributorDb, 'projects', projectId, 'generated_documents', 'invoice_2026_000001');
+  const now = '2026-08-01T12:00:00.000Z';
+  const generatedDocument = {
+    id: 'invoice_2026_000001',
+    projectId,
+    kind: 'invoice',
+    number: 'FAC-2026-0001',
+    status: 'draft',
+    version: 1,
+    documentDate: '2026-08-01',
+    dueDate: '2026-08-15',
+    currency: 'DH',
+    issuer: { name: 'HS Tracker', email: '', phone: '', address: '' },
+    recipient: { name: 'Client', email: '', phone: '', address: '', kind: 'client' },
+    items: [{ id: 'line-1', description: 'Renovation work', quantity: 1, unitPrice: 1200 }],
+    visibleColumns: ['description', 'unitPrice', 'total'],
+    taxRate: 0,
+    notes: '',
+    subtotal: 1200,
+    total: 1200,
+    createdAt: now,
+    createdBy: contributorEmail,
+    updatedAt: now,
+    updatedBy: contributorEmail,
+  };
+
+  const createBatch = writeBatch(contributorDb);
+  createBatch.set(counterRef, {
+    projectId,
+    kind: 'invoice',
+    year: 2026,
+    nextNumber: 1,
+    updatedAt: now,
+    updatedBy: contributorEmail,
+  });
+  createBatch.set(documentRef, generatedDocument);
+  await assertSucceeds(createBatch.commit());
+  await assertSucceeds(getDoc(documentRef));
+  await assertFails(getDoc(doc(outsiderDb, 'projects', projectId, 'generated_documents', generatedDocument.id)));
+
+  await assertFails(updateDoc(counterRef, { nextNumber: 3, updatedAt: now, updatedBy: contributorEmail }));
+  await assertFails(updateDoc(documentRef, {
+    number: 'FAC-2026-9999',
+    version: 2,
+    updatedAt: now,
+    updatedBy: contributorEmail,
+  }));
+  await assertFails(updateDoc(documentRef, {
+    status: 'finalized',
+    version: 3,
+    updatedAt: now,
+    updatedBy: contributorEmail,
+  }));
+  await assertSucceeds(updateDoc(documentRef, {
+    status: 'cancelled',
+    version: 2,
+    updatedAt: '2026-08-01T12:01:00.000Z',
+    updatedBy: contributorEmail,
+  }));
+  await assertFails(deleteDoc(documentRef));
+  await assertFails(deleteDoc(counterRef));
+});
+
+test('AI undo deltas are private to members and removable by their author', async () => {
+  const contributorDb = context('contributor', contributorEmail).firestore();
+  const outsiderDb = context('outsider', 'outsider@example.com').firestore();
+  const entry = {
+    id: 'undo_rules_test',
+    projectId,
+    createdAt: '2026-08-01T12:00:00.000Z',
+    createdBy: contributorEmail,
+    previousRootValues: {},
+    missingRootKeys: [],
+    recordChanges: [{
+      recordId: 'task__task-1',
+      kind: 'task',
+      previous: null,
+    }],
+  };
+  const entryRef = doc(contributorDb, 'projects', projectId, 'ai_undo', entry.id);
+  await assertSucceeds(setDoc(entryRef, entry));
+  await assertFails(getDoc(doc(outsiderDb, 'projects', projectId, 'ai_undo', entry.id)));
+  await assertFails(setDoc(
+    doc(contributorDb, 'projects', projectId, 'ai_undo', 'undo_spoofed'),
+    { ...entry, id: 'undo_spoofed', createdBy: ownerEmail },
+  ));
+  await assertFails(updateDoc(entryRef, { createdAt: '2026-08-01T12:01:00.000Z' }));
+  await assertSucceeds(deleteDoc(entryRef));
 });

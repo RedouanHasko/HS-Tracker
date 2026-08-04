@@ -184,6 +184,21 @@ Enabled in Firebase Console → Authentication → Sign-in method:
 - **Email / Password**
 - **Google**
 
+### App Check rollout (Spark-compatible)
+
+The client supports Firebase App Check with an invisible reCAPTCHA v3 provider. App Check is
+disabled when `VITE_FIREBASE_APP_CHECK_SITE_KEY` is empty, so local development and existing
+production users are not accidentally locked out.
+
+1. Create a reCAPTCHA v3 site for `hs-tracker-1.web.app` and keep its secret outside this repo.
+2. Register web app `1:785042769614:web:ac80603d8af1054e62729f` under Firebase Console > App Check.
+3. Put only the public site key in `.env` as `VITE_FIREBASE_APP_CHECK_SITE_KEY` and deploy hosting.
+4. Monitor App Check metrics until normal Auth and Firestore traffic is reported as verified.
+5. Enable enforcement for Authentication and Cloud Firestore only after verified traffic is stable.
+
+Do not enable enforcement before step 4. Older cached clients without App Check tokens would be
+rejected. The default one-day token TTL minimizes attestations and is appropriate for this private app.
+
 ---
 
 ## Key project files

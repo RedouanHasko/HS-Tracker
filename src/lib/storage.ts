@@ -196,21 +196,22 @@ export async function resolveTaskMediaUrl(storagePath: string, cachedUrl?: strin
 }
 
 /** Remove media from Firestore or Cloud Storage */
-export async function deleteStorageFile(storagePath: string): Promise<void> {
+export async function deleteStorageFileStrict(storagePath: string): Promise<void> {
   if (!storagePath) return;
 
   if (storagePath.startsWith('firestore:project_task_media/')) {
     const mediaId = storagePath.replace('firestore:project_task_media/', '');
-    try {
-      await deleteDoc(doc(db, 'project_task_media', mediaId));
-    } catch (err) {
-      console.warn('Firestore media delete failed:', err);
-    }
+    await deleteDoc(doc(db, 'project_task_media', mediaId));
     return;
   }
 
+  await deleteObject(ref(storage, storagePath));
+}
+
+/** Best-effort removal for interactive media controls that already update local state. */
+export async function deleteStorageFile(storagePath: string): Promise<void> {
   try {
-    await deleteObject(ref(storage, storagePath));
+    await deleteStorageFileStrict(storagePath);
   } catch (err) {
     console.warn('Storage delete failed:', storagePath, err);
   }

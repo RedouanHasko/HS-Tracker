@@ -5,8 +5,12 @@ import {
   signInWithEmailAndPassword, 
   updateProfile,
   GoogleAuthProvider,
-  signInWithPopup
+  signInWithPopup,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signOut as firebaseSignOut,
 } from 'firebase/auth';
+import { authReady } from '../lib/firebase';
 import { Mail, Lock, User, ArrowRight, Chrome, Globe, Moon, Sun } from 'lucide-react';
 import { HSLogo } from './HSLogo';
 import { AppFooter } from './AppFooter';
@@ -20,6 +24,7 @@ export const AuthBoard: React.FC = () => {
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [language, setLanguage] = useState<Language>(() => getLanguage());
   const [theme, setTheme] = useState<'light' | 'dark'>(() => localStorage.getItem('buildtrack_theme') === 'dark' ? 'dark' : 'light');
@@ -38,8 +43,10 @@ export const AuthBoard: React.FC = () => {
 
   const handleGoogleSignIn = async () => {
     setError(null);
+    setSuccess(null);
     setLoading(true);
     try {
+      await authReady;
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
     } catch (err: any) {
@@ -59,16 +66,37 @@ export const AuthBoard: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setSuccess(null);
     setLoading(true);
 
     try {
+      await authReady;
       if (isSignUp) {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
         await updateProfile(userCredential.user, {
-          displayName: name
+          displayName: name.trim()
         });
+        try {
+          await sendEmailVerification(userCredential.user);
+        } finally {
+          await firebaseSignOut(auth);
+        }
+        setSuccess('Account created. Check your email and verify the address before signing in.');
+        setIsSignUp(false);
+        setPassword('');
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
+        const usesPassword = credential.user.providerData.some(
+          (provider) => provider.providerId === 'password'
+        );
+        if (usesPassword && !credential.user.emailVerified) {
+          try {
+            await sendEmailVerification(credential.user);
+          } finally {
+            await firebaseSignOut(auth);
+          }
+          setSuccess('Verify your email before signing in. A new verification message was sent.');
+        }
       }
     } catch (err: any) {
       if (err.code === 'auth/email-already-in-use') {
@@ -83,6 +111,31 @@ export const AuthBoard: React.FC = () => {
         setError('An unexpected error occurred. Please try again.');
       }
       console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePasswordReset = async () => {
+    setError(null);
+    setSuccess(null);
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      setError('Enter your email address first.');
+      return;
+    }
+    setLoading(true);
+    try {
+      await authReady;
+      await sendPasswordResetEmail(auth, cleanEmail);
+      setSuccess('If an account exists for this email, a password reset message has been sent.');
+    } catch (error: any) {
+      console.error('Password reset failed:', error);
+      if (error?.code === 'auth/user-not-found') {
+        setSuccess('If an account exists for this email, a password reset message has been sent.');
+      } else {
+        setError('Could not request a password reset. Please try again later.');
+      }
     } finally {
       setLoading(false);
     }
@@ -134,6 +187,12 @@ export const AuthBoard: React.FC = () => {
               </div>
             )}
 
+            {success && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm font-medium text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-400" role="status">
+                {success}
+              </div>
+            )}
+
             <button
               type="button"
               onClick={handleGoogleSignIn}
@@ -169,6 +228,8 @@ export const AuthBoard: React.FC = () => {
                     required
                     value={name}
                     onChange={(e) => setName(e.target.value)}
+                    autoComplete="name"
+                    maxLength={120}
                     className="w-full bg-slate-50 dark:bg-[#0f1423] border border-slate-200 dark:border-slate-800 rounded-xl leading-none px-4 py-3.5 pl-11 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
                     placeholder="Jane Doe"
                   />
@@ -189,6 +250,9 @@ export const AuthBoard: React.FC = () => {
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                  inputMode="email"
+                  maxLength={254}
                   className="w-full bg-slate-50 dark:bg-[#0f1423] border border-slate-200 dark:border-slate-800 rounded-xl leading-none px-4 py-3.5 pl-11 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
                   placeholder="jane@example.com"
                 />
@@ -208,6 +272,9 @@ export const AuthBoard: React.FC = () => {
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  autoComplete={isSignUp ? 'new-password' : 'current-password'}
+                  minLength={isSignUp ? 10 : undefined}
+                  maxLength={128}
                   className="w-full bg-slate-50 dark:bg-[#0f1423] border border-slate-200 dark:border-slate-800 rounded-xl leading-none px-4 py-3.5 pl-11 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-transparent transition-all"
                   placeholder="••••••••"
                 />
@@ -228,6 +295,17 @@ export const AuthBoard: React.FC = () => {
                 </>
               )}
             </button>
+
+            {!isSignUp && (
+              <button
+                type="button"
+                onClick={handlePasswordReset}
+                disabled={loading}
+                className="self-end text-xs font-semibold text-sky-600 transition-colors hover:text-sky-500 disabled:opacity-50 dark:text-sky-400"
+              >
+                Forgot password?
+              </button>
+            )}
             
           </form>
 
