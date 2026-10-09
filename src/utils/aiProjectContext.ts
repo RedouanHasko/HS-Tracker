@@ -2,6 +2,7 @@ import { Project } from '../types';
 import { calculateSettlements } from './mockData';
 import { resolveUserRole } from './permissions';
 import { loadDocumentParties } from './documentProfiles';
+import { taskOwnerEmail } from './taskState';
 
 /** Compact project snapshot for the AI system prompt */
 export function buildProjectContext(project: Project, userEmail: string): string {
@@ -15,7 +16,7 @@ export function buildProjectContext(project: Project, userEmail: string): string
     status: t.status,
     priority: t.priority,
     deadline: t.deadline,
-    assignedTo: t.assignedTo,
+    assignedTo: taskOwnerEmail(t),
     subtasks: (t.subtasks || []).map((s) => ({
       id: s.id,
       title: s.title,

@@ -14,6 +14,8 @@ import { Project } from '../types';
 export interface AISessionHints {
   lastTaskId?: string | null;
   lastExpenseId?: string | null;
+  /** Voice-call mode: the user hears the reply — keep it short and spoken. */
+  spoken?: boolean;
 }
 
 export interface AIChatTurn {
@@ -82,10 +84,11 @@ export async function askProjectAssistant(
     ? `PROJECT_MODE: user is inside workspace "${activeProject!.name}" (id: ${activeProject!.id}).\nPROJECT_CONTEXT:\n${context}`
     : `WORKSPACE_MODE: user is on the dashboard with ${projects.length} workspace(s).\nWORKSPACE_CONTEXT:\n${context}`}`;
 
-  if (sessionHints?.lastTaskId || sessionHints?.lastExpenseId) {
+  if (sessionHints?.lastTaskId || sessionHints?.lastExpenseId || sessionHints?.spoken) {
     userBlock += `\n\nSESSION_HINTS:\n${JSON.stringify({
       lastTaskId: sessionHints.lastTaskId || undefined,
       lastExpenseId: sessionHints.lastExpenseId || undefined,
+      spoken: sessionHints.spoken || undefined,
     })}`;
   }
 

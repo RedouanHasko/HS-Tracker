@@ -40,10 +40,12 @@ export default function WelcomePage({ language, onSelectType, theme, onThemeTogg
       </div>
       <div className="mx-auto flex max-w-4xl flex-col items-center px-3 pb-8 pt-20 text-center sm:px-4 sm:py-16">
         <div className="mb-8">
-          <HSLogo
-            compact
-            className="mb-5 h-24 w-24 rounded-2xl border border-slate-200 shadow-lg shadow-slate-200/70 dark:border-slate-700 dark:shadow-black/40"
-          />
+          <div className="mb-5 flex justify-center">
+            <HSLogo
+              compact
+              className="mx-auto block h-20 w-auto max-w-[80vw]"
+            />
+          </div>
           <h1 className="text-3xl sm:text-4xl font-bold text-slate-900 dark:text-white mb-3">
             {language === 'en' ? 'Welcome to HS Tracker' : language === 'fr' ? 'Bienvenue sur HS Tracker' : 'مرحباً بك في HS Tracker'}
           </h1>

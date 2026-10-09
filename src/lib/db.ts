@@ -1,7 +1,7 @@
 import { db, auth } from './firebase';
-import { 
-  collection, 
-  doc, 
+import {
+  collection,
+  doc,
   setDoc, 
   getDoc, 
   getDocs, 
@@ -18,6 +18,7 @@ import {
 } from 'firebase/firestore';
 import {
   AppNotification,
+  CalendarEventRecord,
   CivilDocumentRecord,
   ContactRecord,
   DocumentKind,
@@ -25,11 +26,20 @@ import {
   DocumentPresetsMap,
   Invitation,
   Project,
+  QuoteRecord,
   TimelineActivity,
   UserDocumentSettings,
   UserProfile,
 } from '../types';
 import { buildProjectAccessFields, needsProjectAccessFieldSync } from '../utils/permissions';
+import {
+  buildInviteeMembershipPatch,
+  InviteRevokedError,
+  type InviteeMembershipDecision,
+  type InviteeMembershipOutcome,
+} from '../utils/invitations';
+
+export { InviteRevokedError };
 import { stripUndefinedForFirestore } from './firestoreSanitize';
 import {
   hydrateVersionedProject,
@@ -198,6 +208,21 @@ export const findUserProfile = async (search: string): Promise<UserProfile & { e
   }
 };
 
+/**
+ * A `rentalProperty: null` on the incoming project means "this is not a rental
+ * workspace — remove the field". Firestore rules reject a null map, so translate
+ * it to deleteField() AFTER stripUndefinedForFirestore (which would destroy the
+ * sentinel if applied before). Call with the pre-strip payload object.
+ */
+function applyRentalPropertyDeletion(
+  payload: Record<string, unknown>,
+  hadNullRentalProperty: boolean
+): void {
+  if (hadNullRentalProperty) {
+    payload.rentalProperty = deleteField();
+  }
+}
+
 /** Normalize members + optional arrays so merge writes never drop server fields or break rules diffs. */
 function normalizeProjectForFirestore(project: Project): Project {
   const members = (project.members ?? []).map((m) => {
@@ -288,9 +313,12 @@ async function saveVersionedProject(project: Project, authEmail: string): Promis
   }
 
   const batch = writeBatch(db);
+  const strippedRoot = stripUndefinedForFirestore(root) as Record<string, unknown>;
+  // Null rentalProperty (construction workspace) must be deleted, not written as null.
+  applyRentalPropertyDeletion(strippedRoot, (root as unknown as Record<string, unknown>).rentalProperty === null);
   batch.set(
     doc(db, 'projects', project.id),
-    stripUndefinedForFirestore(root),
+    strippedRoot,
     { merge: true }
   );
   for (const [recordId, record] of changedRecords) {
@@ -354,6 +382,8 @@ export const migrateProjectToVersionedStorage = async (project: Project): Promis
   const rootUpdate: Record<string, unknown> = {
     ...stripUndefinedForFirestore(root),
   };
+  // Null rentalProperty (construction workspace) must be deleted, not written as null.
+  applyRentalPropertyDeletion(rootUpdate, (root as unknown as Record<string, unknown>).rentalProperty === null);
   for (const field of LEGACY_PROJECT_ARRAY_FIELDS) rootUpdate[field] = deleteField();
   batch.set(doc(db, 'projects', project.id), rootUpdate, { merge: true });
   records.forEach((record, recordId) => {
@@ -469,7 +499,9 @@ export const saveProjectToDB = async (userId: string, project: Project) => {
     const updatedProject = stripUndefinedForFirestore({
       ...normalized,
       ...access,
-    });
+    }) as Record<string, unknown>;
+    // Null rentalProperty (construction workspace) must be deleted, not written as null.
+    applyRentalPropertyDeletion(updatedProject, (normalized as unknown as Record<string, unknown>).rentalProperty === null);
 
     const projectRef = doc(db, 'projects', project.id);
     // A merge creates missing documents too, avoiding one billed read before every write.
@@ -771,6 +803,82 @@ export const saveUserDocumentSettingsToDB = async (
   );
 };
 
+// Standalone sales quotes (devis) — user-private records that exist before any
+// project does. No Firestore rules change needed: users/{userId}/{document=**}
+// is owner-only, and numbering runs in a transaction against a per-year counter.
+export const subscribeToQuotes = (
+  userId: string,
+  callback: (quotes: QuoteRecord[]) => void
+) => {
+  if (!userId) {
+    callback([]);
+    return () => {};
+  }
+  return onSnapshot(
+    collection(db, 'users', userId, 'quotes'),
+    (snap) => callback(snap.docs.map((d) => d.data() as QuoteRecord)),
+    (error) => logFirestoreError(error, OperationType.LIST, `users/${userId}/quotes`)
+  );
+};
+
+export const saveQuoteToDB = async (userId: string, quote: QuoteRecord): Promise<void> => {
+  if (!auth.currentUser || auth.currentUser.uid !== userId) throw new Error('Sign in before saving quotes.');
+  if (!quote.id) throw new Error('A quote id is required.');
+  await setDoc(
+    doc(db, 'users', userId, 'quotes', quote.id),
+    stripUndefinedForFirestore({ ...quote, updatedAt: new Date().toISOString() }),
+    { merge: true }
+  );
+};
+
+export const deleteQuoteFromDB = async (userId: string, quoteId: string): Promise<void> => {
+  if (!auth.currentUser || auth.currentUser.uid !== userId) throw new Error('Sign in before deleting quotes.');
+  await deleteDoc(doc(db, 'users', userId, 'quotes', quoteId));
+};
+
+/** Atomically reserve the next DEV-YYYY-#### number for this user + year. */
+export const allocateQuoteNumber = async (userId: string, year: string, prefix: string): Promise<string> => {
+  if (!auth.currentUser || auth.currentUser.uid !== userId) throw new Error('Sign in before numbering quotes.');
+  const counterRef = doc(db, 'users', userId, 'quote_counters', year);
+  return runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(counterRef);
+    const next = ((snap.exists() ? (snap.data().next as number) : 0) || 0) + 1;
+    transaction.set(counterRef, { next, updatedAt: new Date().toISOString() });
+    return `${prefix}-${year}-${String(next).padStart(4, '0')}`;
+  });
+};
+
+// Work-calendar events — user-private, like quotes (no project needed, no rules change).
+export const subscribeToCalendarEvents = (
+  userId: string,
+  callback: (events: CalendarEventRecord[]) => void
+) => {
+  if (!userId) {
+    callback([]);
+    return () => {};
+  }
+  return onSnapshot(
+    collection(db, 'users', userId, 'calendar_events'),
+    (snap) => callback(snap.docs.map((d) => d.data() as CalendarEventRecord)),
+    (error) => logFirestoreError(error, OperationType.LIST, `users/${userId}/calendar_events`)
+  );
+};
+
+export const saveCalendarEventToDB = async (userId: string, event: CalendarEventRecord): Promise<void> => {
+  if (!auth.currentUser || auth.currentUser.uid !== userId) throw new Error('Sign in before saving calendar events.');
+  if (!event.id || !event.date) throw new Error('A calendar event needs a date.');
+  await setDoc(
+    doc(db, 'users', userId, 'calendar_events', event.id),
+    stripUndefinedForFirestore({ ...event, updatedAt: new Date().toISOString() }),
+    { merge: true }
+  );
+};
+
+export const deleteCalendarEventFromDB = async (userId: string, eventId: string): Promise<void> => {
+  if (!auth.currentUser || auth.currentUser.uid !== userId) throw new Error('Sign in before deleting calendar events.');
+  await deleteDoc(doc(db, 'users', userId, 'calendar_events', eventId));
+};
+
 // Invitations: Root collection
 export const sendProjectInvitation = async (invitation: Invitation) => {
   try {
@@ -819,6 +927,103 @@ export const revokeProjectInvitation = async (invitationId: string) => {
     handleFirestoreError(error, OperationType.DELETE, `invitations/${invitationId}`);
     throw error;
   }
+};
+
+/**
+ * Best-effort revoke used when removing a member: a missing invitation doc (already
+ * consumed, never created, or deleted) must NOT block removing the member row.
+ * Returns true when nothing stands in the way of the member removal.
+ */
+export const revokeProjectInvitationBestEffort = async (invitationId: string): Promise<boolean> => {
+  if (!invitationId) return true;
+  const inviteRef = doc(db, 'invitations', invitationId);
+  try {
+    const snap = await getDoc(inviteRef);
+    if (!snap.exists()) return true;
+    await deleteDoc(inviteRef);
+    return true;
+  } catch (error) {
+    // Genuine failures (signed out, offline, permission) still surface.
+    if (error instanceof Error && /permission|PERMISSION_DENIED|insufficient/i.test(error.message)) {
+      // Deleting a doc that vanished concurrently also lands here — verify before failing.
+      try {
+        const retry = await getDoc(inviteRef);
+        if (!retry.exists()) return true;
+      } catch {
+        return true;
+      }
+    }
+    console.error('Best-effort invitation revoke failed:', error);
+    return false;
+  }
+};
+
+/** Lowercased copy of the stored memberEmails access list (order preserved for rule equality). */
+function cleanMemberEmailsOf(data: Partial<Project> & { memberEmails?: string[] }): string[] {
+  return (data.memberEmails || []).map((e) => e.toLowerCase());
+}
+
+/**
+ * Invitee self-service join/decline. Reads ONLY the project root (pending invitees
+ * cannot read versioned records) and writes a surgical updateDoc the rules expressly
+ * allow — so accepting works on storageVersion 1 and 2 alike.
+ */
+export const applyInviteeMembershipPatch = async (
+  args: InviteeMembershipDecision
+): Promise<{ outcome: InviteeMembershipOutcome; memberEmailsAfter: string[] }> => {
+  const projectRef = doc(db, 'projects', args.projectId);
+  let snap;
+  try {
+    snap = await getDoc(projectRef);
+  } catch (error) {
+    if (error instanceof Error && /permission|PERMISSION_DENIED|insufficient/i.test(error.message)) {
+      throw new InviteRevokedError('This invitation is no longer valid. Ask the project owner to re-invite you.');
+    }
+    throw error;
+  }
+  if (!snap.exists()) {
+    throw new InviteRevokedError('This project no longer exists.');
+  }
+  const data = snap.data() as Partial<Project> & { memberEmails?: string[]; invitedEmails?: string[] };
+  const built = buildInviteeMembershipPatch(
+    {
+      members: data.members || [],
+      memberEmails: data.memberEmails || [],
+      invitedEmails: data.invitedEmails || [],
+      creatorEmail: data.creatorEmail || '',
+    },
+    args
+  );
+  if (built.outcome === 'already-member' || built.outcome === 'already-declined') {
+    // Idempotent retry: the invite lists may still reference the user (stale invite).
+    // Repair is cosmetic — membership/decline already holds — so never fail the flow here.
+    const storedInvited = ((data.invitedEmails || []) as string[]).map((e) => e.toLowerCase());
+    if (JSON.stringify(built.update.invitedEmails) !== JSON.stringify(storedInvited)) {
+      const healUpdate =
+        built.outcome === 'already-member'
+          ? {
+              members: built.update.members,
+              memberEmails: cleanMemberEmailsOf(data),
+              invitedEmails: built.update.invitedEmails,
+            }
+          : { members: built.update.members, invitedEmails: built.update.invitedEmails };
+      try {
+        await updateDoc(projectRef, stripUndefinedForFirestore(healUpdate) as Record<string, unknown>);
+      } catch (error) {
+        console.warn('Invite list healing skipped:', error);
+      }
+    }
+    return { outcome: built.outcome, memberEmailsAfter: built.memberEmailsAfter };
+  }
+  try {
+    await updateDoc(projectRef, stripUndefinedForFirestore(built.update) as Record<string, unknown>);
+  } catch (error) {
+    if (error instanceof Error && /permission|PERMISSION_DENIED|insufficient/i.test(error.message)) {
+      throw new InviteRevokedError('Could not update the project membership. Ask the project owner to re-invite you.');
+    }
+    throw error;
+  }
+  return { outcome: built.outcome, memberEmailsAfter: built.memberEmailsAfter };
 };
 
 // Global Activities: Root Collection

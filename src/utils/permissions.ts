@@ -183,6 +183,41 @@ export function canDeleteExpense(expense: Expense, project: Project, userEmail: 
   return canEditExpense(expense, project, userEmail, role);
 }
 
+/**
+ * Human-readable reason a task cannot be edited, so the UI can explain the lock instead of
+ * leaving a viewer guessing. Returns null when editing is allowed.
+ */
+export function taskEditDenialReason(
+  task: Task,
+  project: Project,
+  userEmail: string,
+  role: UserRole,
+  language: 'en' | 'fr' | 'ar' = 'en'
+): string | null {
+  if (canEditTask(task, project, userEmail, role)) return null;
+  if (role === 'read_only' || !permCanManageTasks(role)) {
+    return language === 'fr'
+      ? 'Accès en lecture seule — demandez un rôle de contributeur au propriétaire.'
+      : language === 'ar'
+        ? 'صلاحيات قراءة فقط — اطلب دور مساهم من المالك.'
+        : 'Read-only access — ask the project owner for a contributor role.';
+  }
+  const creator = taskCreatorEmail(task, project);
+  const owner = project.creatorEmail.toLowerCase();
+  if (creator === owner) {
+    return language === 'fr'
+      ? 'Tâche créée par le propriétaire du projet — seul le propriétaire peut la modifier.'
+      : language === 'ar'
+        ? 'أنشأها مالك المشروع — يمكن للمالك وحده تعديلها.'
+        : 'Created by the project owner — only the owner can change it.';
+  }
+  return language === 'fr'
+    ? 'Seuls son créateur, un gestionnaire ou le propriétaire peuvent modifier cette tâche.'
+    : language === 'ar'
+      ? 'يمكن لمنشئها أو مدير أو المالك وحدهم تعديل هذه المهمة.'
+      : 'Only its creator, a manager, or the project owner can change this task.';
+}
+
 function permCanManageTasks(role: UserRole): boolean {
   return roleLevel(role) >= ROLE_LEVEL.contributor;
 }

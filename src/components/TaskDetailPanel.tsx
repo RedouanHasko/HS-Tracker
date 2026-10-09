@@ -22,6 +22,15 @@ import {
   emptyCostLine,
   memberOptions,
 } from '../utils/taskHelpers';
+import { formErrorText, validateCostLines } from '../utils/forms';
+import {
+  TASK_PRIORITY_ORDER,
+  TASK_STATUS_ORDER,
+  taskOwnerEmail,
+  taskPriorityLabel,
+  taskStatusLabel,
+  withTaskOwner,
+} from '../utils/taskState';
 import { compressImageForSparkPlan, compressImageFile, formatFileSize, MAX_ATTACHMENT_BYTES, MAX_SPARK_ATTACHMENT_BYTES } from '../utils/imageCompression';
 import { uploadProjectTaskFile, deleteStorageFile, stripTaskMediaUrlsForSave, resolveTaskMediaUrl, isUsingFirestoreMedia } from '../lib/storage';
 import { syncProjectAccessFieldsIfNeeded } from '../lib/db';
@@ -101,38 +110,50 @@ function PhotoSection({
   const [status, setStatus] = useState('');
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files: File[] = Array.from(e.target.files || []);
+    if (files.length === 0) return;
     e.target.value = '';
     setBusy(true);
     setStatus(labels.compressing);
     try {
-      const { blob, originalSize, compressedSize, fileName } = isUsingFirestoreMedia()
-        ? await compressImageForSparkPlan(file)
-        : await compressImageFile(file);
-      setStatus(`${labels.compressionSaved}: ${formatFileSize(originalSize)} → ${formatFileSize(compressedSize)}`);
-      setStatus(labels.uploading);
       const uid = auth.currentUser?.uid;
       if (uid) {
         await syncProjectAccessFieldsIfNeeded(uid, project);
       }
-      const { url, storagePath, sizeBytes } = await uploadProjectTaskFile(
-        projectId,
-        taskId,
-        category,
-        blob,
-        fileName
-      );
-      const newMedia: TaskMedia = {
-        id: `img_${Date.now()}`,
-        url,
-        storagePath,
-        uploadDate: new Date().toISOString(),
-        sizeBytes,
-        originalName: file.name,
-      };
-      onImagesChange([...images, newMedia]);
-      setStatus(labels.saved);
+      const uploaded: TaskMedia[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (!file.type.startsWith('image/')) continue;
+        if (files.length > 1) {
+          setStatus(`${labels.compressing} ${i + 1}/${files.length}`);
+        }
+        const { blob, originalSize, compressedSize, fileName } = isUsingFirestoreMedia()
+          ? await compressImageForSparkPlan(file)
+          : await compressImageFile(file);
+        setStatus(`${labels.compressionSaved}: ${formatFileSize(originalSize)} → ${formatFileSize(compressedSize)}`);
+        setStatus(labels.uploading);
+        const { url, storagePath, sizeBytes } = await uploadProjectTaskFile(
+          projectId,
+          taskId,
+          category,
+          blob,
+          fileName
+        );
+        uploaded.push({
+          id: `img_${Date.now()}_${i}`,
+          url,
+          storagePath,
+          uploadDate: new Date().toISOString(),
+          sizeBytes,
+          originalName: file.name,
+        });
+      }
+      if (uploaded.length > 0) {
+        onImagesChange([...images, ...uploaded]);
+        setStatus(labels.saved);
+      } else {
+        setStatus('');
+      }
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -173,6 +194,7 @@ function PhotoSection({
               ref={inputRef}
               type="file"
               accept="image/*"
+              multiple
               className="hidden"
               onChange={handleUpload}
             />
@@ -233,6 +255,7 @@ export default function TaskDetailPanel({
   const labels = TASK_DETAIL_LABELS[language];
   const [task, setTask] = useState(() => normalizeTask(initialTask));
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const [fileBusy, setFileBusy] = useState(false);
   const [fileStatus, setFileStatus] = useState('');
   const [pdfBlockedMessage, setPdfBlockedMessage] = useState('');
@@ -243,6 +266,22 @@ export default function TaskDetailPanel({
   const update = (patch: Partial<Task>) => setTask((t) => ({ ...t, ...patch }));
 
   const handleSave = async () => {
+    if (!task.title.trim()) {
+      setSaveError(
+        language === 'fr' ? 'Le titre de la tâche est requis.' : language === 'ar' ? 'عنوان المهمة مطلوب.' : 'A task title is required.'
+      );
+      return;
+    }
+    const badLine = validateCostLines(
+      (task.costLines || []).map((line) => ({ label: line.label, amount: line.amount }))
+    );
+    if (badLine) {
+      setSaveError(
+        `${formErrorText(badLine.code, language)} (${language === 'fr' ? 'ligne' : language === 'ar' ? 'البند' : 'line'} ${badLine.index + 1})`
+      );
+      return;
+    }
+    setSaveError('');
     setSaving(true);
     try {
       const toSave: Task = {
@@ -265,73 +304,78 @@ export default function TaskDetailPanel({
     file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 
   const handleAttachmentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files: File[] = Array.from(e.target.files || []);
+    if (files.length === 0) return;
     e.target.value = '';
     setFileStatus('');
     setPdfBlockedMessage('');
 
-    if (onFreePlan && isPdfFile(file)) {
+    if (onFreePlan && files.some((file) => isPdfFile(file))) {
       setPdfBlockedMessage(labels.pdfUploadBlocked);
       return;
     }
 
     setFileBusy(true);
     try {
-      let blob: Blob = file;
-      let fileName = file.name;
-      let sizeBytes = file.size;
-      const mimeType = file.type || 'application/octet-stream';
-
-      if (file.type.startsWith('image/')) {
-        setFileStatus(labels.compressing);
-        const compressed = onFreePlan
-          ? await compressImageForSparkPlan(file)
-          : await compressImageFile(file);
-        blob = compressed.blob;
-        fileName = compressed.fileName;
-        sizeBytes = compressed.compressedSize;
-        setFileStatus(`${labels.compressionSaved}: ${formatFileSize(compressed.originalSize)} → ${formatFileSize(compressed.compressedSize)}`);
-      } else if (onFreePlan && isPdfFile(file)) {
-        setPdfBlockedMessage(labels.pdfUploadBlocked);
-        return;
-      } else if (file.size > maxAttachment) {
-        throw new Error(labels.maxFileSize);
-      }
-
-      setFileStatus(labels.uploading);
       const uid = auth.currentUser?.uid;
       if (uid) {
         await syncProjectAccessFieldsIfNeeded(uid, project);
       }
-      const { url, storagePath } = await uploadProjectTaskFile(
-        project.id,
-        task.id,
-        'attachments',
-        blob,
-        fileName,
-        mimeType
-      );
+      const uploaded: TaskAttachment[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        let blob: Blob = file;
+        let fileName = file.name;
+        let sizeBytes = file.size;
+        const mimeType = file.type || 'application/octet-stream';
 
-      const attachment: TaskAttachment = {
-        id: `att_${Date.now()}`,
-        title: file.name,
-        url,
-        storagePath,
-        fileType: file.type === 'application/pdf' ? 'pdf' : file.type.startsWith('image/') ? 'image' : 'other',
-        sizeBytes,
-        uploadDate: new Date().toISOString(),
-        kind: file.name.toLowerCase().includes('facture') || file.name.toLowerCase().includes('invoice') ? 'invoice' : 'receipt',
-      };
-      update({ attachments: [...(task.attachments || []), attachment] });
-      setFileStatus(labels.saved);
+        if (file.type.startsWith('image/')) {
+          setFileStatus(files.length > 1 ? `${labels.compressing} ${i + 1}/${files.length}` : labels.compressing);
+          const compressed = onFreePlan
+            ? await compressImageForSparkPlan(file)
+            : await compressImageFile(file);
+          blob = compressed.blob;
+          fileName = compressed.fileName;
+          sizeBytes = compressed.compressedSize;
+          setFileStatus(`${labels.compressionSaved}: ${formatFileSize(compressed.originalSize)} → ${formatFileSize(compressed.compressedSize)}`);
+        } else if (onFreePlan && isPdfFile(file)) {
+          setPdfBlockedMessage(labels.pdfUploadBlocked);
+          continue;
+        } else if (file.size > maxAttachment) {
+          throw new Error(labels.maxFileSize);
+        }
+
+        setFileStatus(labels.uploading);
+        const { url, storagePath } = await uploadProjectTaskFile(
+          project.id,
+          task.id,
+          'attachments',
+          blob,
+          fileName,
+          mimeType
+        );
+
+        uploaded.push({
+          id: `att_${Date.now()}_${i}`,
+          title: file.name,
+          url,
+          storagePath,
+          fileType: file.type === 'application/pdf' ? 'pdf' : file.type.startsWith('image/') ? 'image' : 'other',
+          sizeBytes,
+          uploadDate: new Date().toISOString(),
+          kind: file.name.toLowerCase().includes('facture') || file.name.toLowerCase().includes('invoice') ? 'invoice' : 'receipt',
+        });
+      }
+
+      if (uploaded.length > 0) {
+        update({ attachments: [...(task.attachments || []), ...uploaded] });
+        setFileStatus(labels.saved);
+      } else {
+        setFileStatus('');
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Upload failed';
-      if (onFreePlan && isPdfFile(file)) {
-        setPdfBlockedMessage(labels.pdfUploadBlocked);
-      } else {
-        setFileStatus(msg);
-      }
+      setFileStatus(msg);
     } finally {
       setFileBusy(false);
       setTimeout(() => setFileStatus(''), 4000);
@@ -434,10 +478,29 @@ export default function TaskDetailPanel({
       >
         {/* Header */}
         <div className="flex shrink-0 items-start justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-          <div className="min-w-0 pr-4">
+          <div className="min-w-0 pr-4 flex-1">
             <p className="text-[10px] font-bold uppercase tracking-widest text-sky-600">{labels.title}</p>
-            <h2 className="truncate text-lg font-bold text-slate-900 dark:text-white">{task.title}</h2>
-            <p className="mt-0.5 text-xs text-slate-500">{task.description}</p>
+            {canEdit ? (
+              <input
+                value={task.title}
+                onChange={(e) => update({ title: e.target.value })}
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-base font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                placeholder={language === 'en' ? 'Task title' : language === 'fr' ? 'Titre de la tâche' : 'عنوان المهمة'}
+              />
+            ) : (
+              <h2 className="truncate text-lg font-bold text-slate-900 dark:text-white">{task.title}</h2>
+            )}
+            {canEdit ? (
+              <textarea
+                value={task.description || ''}
+                onChange={(e) => update({ description: e.target.value })}
+                rows={2}
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300"
+                placeholder={language === 'en' ? 'Description' : language === 'fr' ? 'Description' : 'الوصف'}
+              />
+            ) : (
+              <p className="mt-0.5 text-xs text-slate-500">{task.description}</p>
+            )}
           </div>
           <button
             type="button"
@@ -459,6 +522,67 @@ export default function TaskDetailPanel({
                 : 'الخطة المجانية: الصور مضغوطة (~180 ك.ب) في Firestore — بدون Cloud Storage.'}
             </p>
           )}
+          {/* Status, priority & assignee — the basics the kanban column depends on */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                {language === 'fr' ? 'Statut' : language === 'ar' ? 'الحالة' : 'Status'}
+              </label>
+              {canEdit ? (
+                <select
+                  value={task.status}
+                  onChange={(e) => update({ status: e.target.value as Task['status'] })}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+                >
+                  {TASK_STATUS_ORDER.map((s) => (
+                    <option key={s} value={s}>{taskStatusLabel(s, language)}</option>
+                  ))}
+                </select>
+              ) : (
+                <p className="py-2 text-sm font-medium">{taskStatusLabel(task.status, language)}</p>
+              )}
+            </div>
+            <div>
+              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                {language === 'fr' ? 'Priorité' : language === 'ar' ? 'الأولوية' : 'Priority'}
+              </label>
+              {canEdit ? (
+                <select
+                  value={task.priority}
+                  onChange={(e) => update({ priority: e.target.value as Task['priority'] })}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+                >
+                  {TASK_PRIORITY_ORDER.map((p) => (
+                    <option key={p} value={p}>{taskPriorityLabel(p, language)}</option>
+                  ))}
+                </select>
+              ) : (
+                <p className="py-2 text-sm font-medium">{taskPriorityLabel(task.priority, language)}</p>
+              )}
+            </div>
+            <div>
+              <label className="mb-1 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <User className="h-3 w-3" />
+                {language === 'fr' ? 'Assigné à' : language === 'ar' ? 'مُسند إلى' : 'Assigned to'}
+              </label>
+              {canEdit ? (
+                <select
+                  value={taskOwnerEmail(task)}
+                  onChange={(e) => setTask((t) => withTaskOwner(t, e.target.value))}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
+                >
+                  {members.map((m) => (
+                    <option key={m.email} value={m.email}>{m.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <p className="py-2 text-sm font-medium">
+                  {members.find((m) => m.email === taskOwnerEmail(task))?.name || taskOwnerEmail(task) || '—'}
+                </p>
+              )}
+            </div>
+          </div>
+
           {/* Worker & category */}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
@@ -467,8 +591,8 @@ export default function TaskDetailPanel({
               </label>
               {canEdit ? (
                 <select
-                  value={task.workedBy || task.assignedTo}
-                  onChange={(e) => update({ workedBy: e.target.value })}
+                  value={taskOwnerEmail(task)}
+                  onChange={(e) => setTask((t) => withTaskOwner(t, e.target.value))}
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950"
                 >
                   {members.map((m) => (
@@ -476,7 +600,7 @@ export default function TaskDetailPanel({
                   ))}
                 </select>
               ) : (
-                <p className="text-sm font-medium">{members.find((m) => m.email === (task.workedBy || task.assignedTo))?.name || task.assignedTo}</p>
+                <p className="text-sm font-medium">{members.find((m) => m.email === taskOwnerEmail(task))?.name || taskOwnerEmail(task)}</p>
               )}
             </div>
             <div>
@@ -502,11 +626,19 @@ export default function TaskDetailPanel({
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  {language === 'fr' ? 'Échéance' : language === 'ar' ? 'الموعد النهائي' : 'Deadline'}
+                </label>
+                <input type="date" readOnly={!canEdit} value={task.deadline || ''} onChange={(e) => update({ deadline: e.target.value })} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950" />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
                   {language === 'fr' ? 'Échéance de référence' : language === 'ar' ? 'الموعد الأساسي' : 'Baseline deadline'}
                 </label>
                 <input type="date" readOnly={!canEdit} value={task.baselineDeadline || ''} onChange={(e) => update({ baselineDeadline: e.target.value })} className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950" />
               </div>
-              <label className="flex h-10 items-center gap-2 self-end rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700">
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 text-sm dark:border-slate-700">
                 <input type="checkbox" disabled={!canEdit} checked={Boolean(task.milestone)} onChange={(e) => update({ milestone: e.target.checked })} />
                 {language === 'fr' ? 'Jalon du projet' : language === 'ar' ? 'مرحلة رئيسية' : 'Project milestone'}
               </label>
@@ -541,6 +673,7 @@ export default function TaskDetailPanel({
             subtasks={task.subtasks || []}
             canEdit={canEdit}
             labels={labels}
+            language={language}
             onChange={(subtasks) => update({ subtasks })}
             onRequestRemove={promptRemoveSubtask}
           />
@@ -599,9 +732,10 @@ export default function TaskDetailPanel({
                       const costLines = [...(task.costLines || [])];
                       costLines[idx] = { ...line, label: e.target.value };
                       update({ costLines });
+                      setSaveError('');
                     }}
                     placeholder={labels.label}
-                    className="col-span-5 rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
+                    className="col-span-5 min-w-0 rounded border border-slate-200 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-950"
                   />
                   <select
                     disabled={!canEdit}
@@ -621,14 +755,18 @@ export default function TaskDetailPanel({
                   <input
                     type="number"
                     readOnly={!canEdit}
+                    min={0}
+                    step="any"
                     value={line.amount || ''}
                     onChange={(e) => {
                       const costLines = [...(task.costLines || [])];
-                      costLines[idx] = { ...line, amount: Number(e.target.value) };
+                      const next = Number(e.target.value);
+                      costLines[idx] = { ...line, amount: Number.isNaN(next) ? 0 : Math.max(0, next) };
                       update({ costLines });
+                      setSaveError('');
                     }}
                     placeholder={labels.amount}
-                    className="col-span-3 rounded border border-slate-200 px-2 py-1.5 text-xs font-mono dark:border-slate-700 dark:bg-slate-950"
+                    className="col-span-3 min-w-0 rounded border border-slate-200 px-2 py-1.5 text-xs font-mono dark:border-slate-700 dark:bg-slate-950"
                   />
                   {canEdit && (
                     <button
@@ -661,6 +799,7 @@ export default function TaskDetailPanel({
                     ref={fileInputRef}
                     type="file"
                     accept={onFreePlan ? 'image/*' : 'image/*,application/pdf'}
+                    multiple
                     className="hidden"
                     onChange={handleAttachmentUpload}
                   />
@@ -739,7 +878,13 @@ export default function TaskDetailPanel({
         </div>
 
         {/* Footer */}
-        <div className="flex shrink-0 justify-end gap-2 border-t border-slate-100 px-5 py-4 dark:border-slate-800">
+        <div className="shrink-0 border-t border-slate-100 px-5 py-4 dark:border-slate-800">
+          {saveError && (
+            <p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+              {saveError}
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
@@ -758,6 +903,7 @@ export default function TaskDetailPanel({
               {labels.save}
             </button>
           )}
+          </div>
         </div>
       </motion.div>
     </motion.div>

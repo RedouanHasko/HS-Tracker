@@ -12,7 +12,6 @@ import {
   ArrowLeft,
   Settings,
   History,
-  X,
   MoreHorizontal,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
@@ -37,9 +36,6 @@ export interface TopNavbarProps {
   mode?: 'dashboard' | 'project';
 
   // Dashboard
-  searchQuery?: string;
-  onSearchChange?: (query: string) => void;
-  searchPlaceholder?: string;
   createLabel?: string;
   onCreateProject?: () => void;
   unreadCount?: number;
@@ -58,6 +54,10 @@ export interface TopNavbarProps {
   settingsLabel?: string;
   onOpenActivityHistory?: () => void;
   activityHistoryLabel?: string;
+
+  // Universal search (spotlight)
+  onOpenSearch?: () => void;
+  searchEverywhereLabel?: string;
 }
 
 /** Shared icon-button style for navbar actions */
@@ -83,7 +83,7 @@ function NavIconButton({
       title={title}
       aria-expanded={ariaExpanded}
       aria-label={title}
-      className={`relative inline-flex h-9 w-9 items-center justify-center rounded-lg border border-transparent text-slate-600 transition-all hover:border-slate-200 hover:bg-slate-100 active:scale-95 dark:text-slate-300 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 ${
+      className={`relative inline-flex h-11 w-11 items-center justify-center rounded-xl border border-transparent text-slate-600 transition-all hover:border-slate-200 hover:bg-slate-100 active:scale-95 dark:text-slate-300 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 ${
         active ? 'border-slate-200 bg-slate-100 dark:border-slate-700 dark:bg-slate-800' : ''
       } ${className}`}
     >
@@ -107,9 +107,6 @@ export function TopNavbar({
   sidebarToggleLabel = 'Toggle sidebar',
   showSidebarToggle = true,
   mode = 'dashboard',
-  searchQuery = '',
-  onSearchChange,
-  searchPlaceholder = 'Search...',
   createLabel = 'New project',
   onCreateProject,
   unreadCount = 0,
@@ -126,6 +123,8 @@ export function TopNavbar({
   settingsLabel = 'Settings',
   onOpenActivityHistory,
   activityHistoryLabel = 'History',
+  onOpenSearch,
+  searchEverywhereLabel = 'Search everywhere',
 }: TopNavbarProps) {
   const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
@@ -154,9 +153,9 @@ export function TopNavbar({
     <header className={`navbar-sticky sticky top-0 z-50 w-full shrink-0 border-b transition-all duration-200 ${
       isScrolled
         ? 'border-slate-200/70 bg-white/90 shadow-[0_1px_0_rgba(0,0,0,0.03)] backdrop-blur-xl backdrop-saturate-150 dark:border-white/[0.06] dark:bg-slate-950/90 dark:shadow-[0_1px_0_rgba(255,255,255,0.04)]'
-        : 'border-transparent bg-transparent'
+        : 'border-slate-200/50 bg-white/75 backdrop-blur-xl backdrop-saturate-150 dark:border-white/[0.04] dark:bg-slate-950/75'
     }`}>
-      <div className="flex h-14 w-full items-center justify-between gap-1.5 px-2 sm:gap-4 sm:px-6">
+      <div className="flex min-h-16 w-full items-center justify-between gap-2 px-3 py-2 sm:gap-4 sm:px-6">
         {/* Left: sidebar toggle + brand / back + title */}
         <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
           {showSidebarToggle && onToggleSidebar && (
@@ -199,8 +198,8 @@ export function TopNavbar({
                 </div>
               )}
               {mode !== 'project' && (
-                <div className="flex min-w-0 items-center gap-2.5 rounded-lg py-1 pr-2">
-                  <HSLogo className="h-8 w-8 shrink-0 sm:h-9 sm:w-9" compact />
+                <div className={`flex min-w-0 items-center gap-2.5 rounded-lg py-1 pr-2 ${sidebarOpen ? 'lg:hidden' : ''}`}>
+                  <HSLogo className="h-8 w-auto max-w-32 shrink-0 sm:h-9" compact />
                   <span className="hidden truncate font-display text-base font-bold tracking-tight text-slate-900 dark:text-white min-[390px]:block sm:text-lg">
                     HS Tracker
                   </span>
@@ -208,8 +207,8 @@ export function TopNavbar({
               )}
             </>
           ) : (
-            <div className="flex min-w-0 items-center gap-2.5 rounded-lg py-1 pr-2">
-              <HSLogo className="h-8 w-8 shrink-0 sm:h-9 sm:w-9" compact />
+            <div className={`flex min-w-0 items-center gap-2.5 rounded-lg py-1 pr-2 ${sidebarOpen ? 'lg:hidden' : ''}`}>
+              <HSLogo className="h-8 w-auto max-w-32 shrink-0 sm:h-9" compact />
               <span className="hidden truncate font-display text-base font-bold tracking-tight text-slate-900 dark:text-white min-[390px]:block sm:text-lg">
                 HS Tracker
               </span>
@@ -225,34 +224,14 @@ export function TopNavbar({
           )}
         </div>
 
-        {/* Center: search (dashboard, desktop) */}
-        {mode === 'dashboard' && onSearchChange && (
-          <div className="hidden max-w-md flex-1 lg:block">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => onSearchChange(e.target.value)}
-                placeholder={searchPlaceholder}
-                className="h-9 w-full rounded-lg border border-slate-200/80 bg-slate-50/80 pl-9 pr-9 text-sm text-slate-900 placeholder:text-slate-400 transition-all focus:border-sky-500/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-500/20 dark:border-slate-700/80 dark:bg-slate-900/60 dark:text-slate-100 dark:focus:bg-slate-900"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => onSearchChange('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                  aria-label="Clear search"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* Right: actions */}
         <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
+          {/* Universal search */}
+          {onOpenSearch && (
+            <NavIconButton onClick={onOpenSearch} title={`${searchEverywhereLabel} (Ctrl+K)`}>
+              <Search className="h-[18px] w-[18px]" />
+            </NavIconButton>
+          )}
           {/* Mobile: notification bell (dashboard only — project mode has its own mobile toolbar) */}
           {mode === 'dashboard' && onToggleNotifications && (
             <NavIconButton
@@ -281,15 +260,13 @@ export function TopNavbar({
 
           {/* Desktop actions */}
           <div className="hidden items-center gap-1.5 lg:flex">
-            {mode === 'dashboard' && onSearchChange && null}
-
             {/* Language */}
             <div className="relative">
               <button
                 type="button"
                 onClick={() => setShowLanguageDropdown(!showLanguageDropdown)}
                 title={langLabel}
-                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200/80 bg-slate-50/50 px-3 text-xs font-semibold text-slate-700 transition-all hover:border-slate-300 hover:bg-slate-100 dark:border-slate-700/80 dark:bg-slate-900/50 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-800"
+                className="inline-flex h-11 items-center gap-1.5 rounded-xl border border-slate-200/80 bg-slate-50/50 px-4 text-sm font-semibold text-slate-700 transition-all hover:border-slate-300 hover:bg-slate-100 dark:border-slate-700/80 dark:bg-slate-900/50 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-800"
               >
                 <Globe className="h-3.5 w-3.5 text-slate-400" />
                 {language.toUpperCase()}
@@ -365,7 +342,7 @@ export function TopNavbar({
               type="button"
               onClick={() => window.dispatchEvent(new CustomEvent('open_profile_settings'))}
               title="Profile"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-sky-600 text-sm font-bold uppercase text-white shadow-sm transition-all hover:bg-sky-500 active:scale-95"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-sky-600 text-sm font-bold uppercase text-white shadow-sm transition-all hover:bg-sky-500 active:scale-95"
             >
               {userInitial}
             </button>
@@ -374,7 +351,7 @@ export function TopNavbar({
               <button
                 type="button"
                 onClick={onCreateProject}
-                className="ml-1 inline-flex h-9 items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 text-xs font-semibold text-white shadow-sm transition-all hover:bg-slate-800 active:scale-[0.98] dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100"
+                className="ml-1 inline-flex h-11 items-center gap-2 rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-slate-800 active:scale-[0.98] dark:bg-white dark:text-slate-900 dark:hover:bg-slate-100"
               >
                 <Plus className="h-4 w-4" />
                 <span>{createLabel}</span>
@@ -385,7 +362,7 @@ export function TopNavbar({
               <button
                 type="button"
                 onClick={onOpenActivityHistory}
-                className="ml-1 inline-flex h-9 items-center gap-1.5 rounded-lg border border-cyan-200 bg-cyan-50 px-3 text-xs font-semibold text-cyan-800 transition-all hover:bg-cyan-100 dark:border-cyan-900/50 dark:bg-cyan-950/40 dark:text-cyan-300 dark:hover:bg-cyan-950/60"
+                className="ml-1 inline-flex h-11 items-center gap-2 rounded-xl border border-cyan-200 bg-cyan-50 px-4 text-sm font-semibold text-cyan-800 transition-all hover:bg-cyan-100 dark:border-cyan-900/50 dark:bg-cyan-950/40 dark:text-cyan-300 dark:hover:bg-cyan-950/60"
               >
                 <History className="h-3.5 w-3.5" />
                 <span>{activityHistoryLabel}</span>
@@ -396,7 +373,7 @@ export function TopNavbar({
               <button
                 type="button"
                 onClick={onOpenSettings}
-                className="ml-1 inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+                className="ml-1 inline-flex h-11 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
               >
                 <Settings className="h-3.5 w-3.5" />
                 <span>{settingsLabel}</span>

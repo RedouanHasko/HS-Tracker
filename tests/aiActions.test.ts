@@ -8,6 +8,8 @@ import {
   isAIConfirmationMessage,
   isAICancellationMessage,
   parseAIConfirmationMessage,
+  normalizeTaskStatus,
+  nextTaskPhase,
 } from '../src/utils/aiActions';
 import { parseDocumentDraft } from '../src/utils/aiDocumentDraft';
 import { compileUIActions } from '../src/utils/aiNavigation';
@@ -347,4 +349,95 @@ test('Darija booking request becomes a real structured action without relying on
   assert.equal(applied.error, undefined);
   assert.equal(applied.project.rentalBookings?.[0].clientName, 'Hucein');
   assert.equal(applied.project.rentalBookings?.[0].totalAmount, 3600);
+});
+
+test('AI understands human status words and relative phases', () => {
+  assert.equal(normalizeTaskStatus('done'), 'completed');
+  assert.equal(normalizeTaskStatus('DONE'), 'completed');
+  assert.equal(normalizeTaskStatus('doing'), 'in_progress');
+  assert.equal(normalizeTaskStatus('in progress'), 'in_progress');
+  assert.equal(normalizeTaskStatus('to-do'), 'pending');
+  assert.equal(normalizeTaskStatus('next', 'pending'), 'in_progress');
+  assert.equal(normalizeTaskStatus('next phase', 'in_progress'), 'completed');
+  assert.equal(normalizeTaskStatus('advance', 'completed'), 'completed');
+  assert.equal(normalizeTaskStatus('banana'), null);
+  assert.equal(nextTaskPhase('pending'), 'in_progress');
+  assert.equal(nextTaskPhase('in_progress'), 'completed');
+  assert.equal(nextTaskPhase('completed'), 'completed');
+});
+
+test('AI moves a task to the next phase from a spoken-style request', () => {
+  const site = {
+    ...project,
+    tasks: [
+      {
+        id: 't-paint',
+        title: 'Sallon painting walls',
+        description: '',
+        assignedTo: 'owner@example.com',
+        priority: 'medium' as const,
+        deadline: '2026-09-01',
+        status: 'pending' as const,
+        subtasks: [],
+      },
+    ],
+  };
+  // "next" resolves against the current phase instead of failing validation.
+  const moved = applyAIAction(
+    site,
+    action('update_task_status', { taskTitle: 'painting walls', status: 'next' }),
+    ctx
+  );
+  assert.equal(moved.error, undefined);
+  assert.equal(moved.project.tasks[0].status, 'in_progress');
+
+  // "done" is accepted as completed.
+  const done = applyAIAction(
+    moved.project,
+    action('update_task_status', { taskTitle: 'Sallon painting walls', status: 'done' }),
+    ctx
+  );
+  assert.equal(done.error, undefined);
+  assert.equal(done.project.tasks[0].status, 'completed');
+
+  // Repeating the same state counts as success (nothing left to change).
+  const repeat = applyAIAction(
+    done.project,
+    action('update_task_status', { taskTitle: 'painting', status: 'completed' }),
+    ctx
+  );
+  assert.equal(repeat.error, undefined);
+
+  // Garbage statuses and unknown tasks name themselves in the error.
+  const bad = applyAIAction(site, action('update_task_status', { taskTitle: 'painting', status: 'banana' }), ctx);
+  assert.match(bad.error || '', /banana/);
+  const missing = applyAIAction(site, action('update_task_status', { taskTitle: 'plumbing', status: 'done' }), ctx);
+  assert.match(missing.error || '', /plumbing/);
+});
+
+test('AI finds expenses by title instead of failing silently', () => {
+  const site = {
+    ...project,
+    expenses: [
+      {
+        id: 'e-cement',
+        title: 'Cement bags Vinci',
+        description: '',
+        amount: 500,
+        currency: 'DH',
+        category: 'materials' as const,
+        date: '2026-08-01',
+        paidBy: 'owner@example.com',
+        supplier: 'Vinci',
+        receipts: [],
+      },
+    ],
+  };
+  const updated = applyAIAction(
+    site,
+    action('update_expense', { expenseTitle: 'cement bags', amount: 550 }),
+    ctx
+  );
+  assert.equal(updated.error, undefined);
+  assert.equal(updated.project.expenses[0].amount, 550);
 });

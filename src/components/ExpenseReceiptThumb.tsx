@@ -1,27 +1,45 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Eye, FileImage, ImageOff, Loader2, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Eye, FileImage, ImageOff, Loader2, X } from 'lucide-react';
 import { TaskMedia } from '../types';
 import { resolveTaskMediaUrl } from '../lib/storage';
 
-/** Receipt thumbnail with an in-app viewer for Firestore and Storage-backed images. */
-export default function ExpenseReceiptThumb({ media, label }: { media: TaskMedia; label: string }) {
+/**
+ * Receipt thumbnail with an in-app viewer for Firestore and Storage-backed images.
+ * Pass `gallery` to turn the viewer into a carousel across all of an expense's receipts.
+ */
+export default function ExpenseReceiptThumb({
+  media,
+  label,
+  gallery,
+}: {
+  media: TaskMedia;
+  label: string;
+  gallery?: TaskMedia[];
+}) {
+  const items = gallery && gallery.length > 0 ? gallery : [media];
+  const startIndex = Math.max(
+    0,
+    items.findIndex((item) => item.id === media.id)
+  );
   const [src, setSrc] = useState(media.url || '');
   const [loading, setLoading] = useState(!media.url);
   const [failed, setFailed] = useState(false);
   const [viewerOpen, setViewerOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(startIndex);
+  const active = items[Math.min(activeIndex, items.length - 1)] || media;
 
   useEffect(() => {
     let cancelled = false;
     setFailed(false);
-    if (media.url) {
-      setSrc(media.url);
+    if (active.url) {
+      setSrc(active.url);
       setLoading(false);
       return;
     }
 
     setLoading(true);
-    resolveTaskMediaUrl(media.storagePath, media.url)
+    resolveTaskMediaUrl(active.storagePath, active.url)
       .then((url) => {
         if (cancelled) return;
         setSrc(url);
@@ -37,13 +55,24 @@ export default function ExpenseReceiptThumb({ media, label }: { media: TaskMedia
     return () => {
       cancelled = true;
     };
-  }, [media.storagePath, media.url]);
+  }, [active.storagePath, active.url]);
+
+  const openViewer = () => {
+    setActiveIndex(startIndex);
+    setViewerOpen(true);
+  };
+
+  const step = (delta: number) => {
+    setActiveIndex((index) => (index + delta + items.length) % items.length);
+  };
 
   useEffect(() => {
     if (!viewerOpen) return;
     const previousOverflow = document.body.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setViewerOpen(false);
+      if (event.key === 'ArrowRight' && items.length > 1) step(1);
+      if (event.key === 'ArrowLeft' && items.length > 1) step(-1);
     };
     document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', closeOnEscape);
@@ -51,7 +80,7 @@ export default function ExpenseReceiptThumb({ media, label }: { media: TaskMedia
       document.body.style.overflow = previousOverflow;
       window.removeEventListener('keydown', closeOnEscape);
     };
-  }, [viewerOpen]);
+  }, [viewerOpen, items.length]);
 
   if (loading) {
     return (
@@ -79,7 +108,7 @@ export default function ExpenseReceiptThumb({ media, label }: { media: TaskMedia
     <>
       <button
         type="button"
-        onClick={() => setViewerOpen(true)}
+        onClick={openViewer}
         title={`${label} - view`}
         aria-label={`${label} - view`}
         className="group relative h-8 w-8 shrink-0 overflow-hidden rounded border border-slate-200 bg-slate-100 outline-none ring-sky-500 transition hover:ring-2 focus-visible:ring-2 dark:border-slate-700 dark:bg-slate-900"
@@ -115,10 +144,15 @@ export default function ExpenseReceiptThumb({ media, label }: { media: TaskMedia
                     className="truncate text-sm font-bold text-slate-900 dark:text-white"
                   >
                     {label}
+                    {items.length > 1 && (
+                      <span className="ml-2 font-mono text-[11px] font-semibold text-slate-400">
+                        {activeIndex + 1} / {items.length}
+                      </span>
+                    )}
                   </h3>
-                  {media.originalName && (
+                  {active.originalName && (
                     <p className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-slate-400">
-                      {media.originalName}
+                      {active.originalName}
                     </p>
                   )}
                 </div>
@@ -135,13 +169,48 @@ export default function ExpenseReceiptThumb({ media, label }: { media: TaskMedia
               </button>
             </div>
             <div className="min-h-0 flex-1 bg-slate-50 p-3 dark:bg-slate-950/60 sm:p-5">
-              <div className="flex h-full min-h-48 items-center justify-center overflow-auto rounded-lg border border-slate-200 bg-white p-2 dark:border-slate-800 dark:bg-slate-950 sm:p-3">
+              <div className="relative flex h-full min-h-48 items-center justify-center overflow-auto rounded-lg border border-slate-200 bg-white p-2 dark:border-slate-800 dark:bg-slate-950 sm:p-3">
+                {items.length > 1 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => step(-1)}
+                      aria-label="Previous receipt"
+                      className="absolute left-2 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition hover:bg-black/65"
+                    >
+                      <ChevronLeft className="h-5 w-5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => step(1)}
+                      aria-label="Next receipt"
+                      className="absolute right-2 top-1/2 z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition hover:bg-black/65"
+                    >
+                      <ChevronRight className="h-5 w-5" />
+                    </button>
+                  </>
+                )}
                 <img
                   src={src}
                   alt={label}
                   className="max-h-[68vh] max-w-full rounded object-contain"
                 />
               </div>
+              {items.length > 1 && (
+                <div className="mt-2 flex justify-center gap-1.5">
+                  {items.map((item, index) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setActiveIndex(index)}
+                      aria-label={`Receipt ${index + 1}`}
+                      className={`h-1.5 rounded-full transition-all ${
+                        index === activeIndex ? 'w-5 bg-sky-500' : 'w-1.5 bg-slate-300 hover:bg-slate-400 dark:bg-slate-700'
+                      }`}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>,

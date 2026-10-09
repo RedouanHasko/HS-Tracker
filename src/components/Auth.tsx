@@ -48,13 +48,26 @@ export const AuthBoard: React.FC = () => {
     try {
       await authReady;
       const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
+      try {
+        await signInWithPopup(auth, provider);
+      } catch (firstErr: any) {
+        // Popup sign-in hits Google's servers directly — a single timeout or
+        // blocked request deserves one retry before telling the user it failed.
+        if (firstErr?.code === 'auth/network-request-failed') {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await signInWithPopup(auth, provider);
+        } else {
+          throw firstErr;
+        }
+      }
     } catch (err: any) {
       if (err.code !== 'auth/popup-closed-by-user') {
-        if (err.code === 'auth/internal-error' || err.code === 'auth/operation-not-allowed') {
+        if (err.code === 'auth/operation-not-allowed') {
           setError('Google Authentication is not enabled. Please go to your Firebase Console > Authentication > Sign-in method, and ensure the Google provider is enabled.');
+        } else if (err.code === 'auth/unauthorized-domain') {
+          setError('This site address is not authorized for sign-in. Add it under Firebase Console > Authentication > Settings > Authorized domains.');
         } else {
-          setError('Failed to sign in with Google. Please try again.');
+          setError(`Google sign-in failed (${err.code || 'unknown error'}). Check your connection and try again.`);
         }
         console.error(err);
       }
@@ -105,10 +118,12 @@ export const AuthBoard: React.FC = () => {
         setError('Invalid email or password.');
       } else if (err.code === 'auth/weak-password') {
         setError('Password is too weak. Please use at least 6 characters.');
-      } else if (err.code === 'auth/internal-error' || err.code === 'auth/operation-not-allowed') {
+      } else if (err.code === 'auth/operation-not-allowed') {
         setError('Authentication is not enabled. Please go to your Firebase Console > Authentication > Sign-in method, and ensure Email/Password and Google providers are enabled.');
+      } else if (err.code === 'auth/unauthorized-domain') {
+        setError('This site address is not authorized for sign-in. Add it under Firebase Console > Authentication > Settings > Authorized domains.');
       } else {
-        setError('An unexpected error occurred. Please try again.');
+        setError(`Sign-in failed (${err.code || 'unknown error'}). Please try again.`);
       }
       console.error(err);
     } finally {

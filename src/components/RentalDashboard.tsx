@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { motion } from 'motion/react';
-import { Building, KeyRound, DollarSign, Calendar, TrendingUp, Plus, Users, ChevronRight, Phone, User as UserIcon, CheckCircle2, X, Trash2, Clock, Percent, Filter, LayoutGrid, Search, Table, BedDouble, AlertTriangle, Wrench, FileDown, Printer, ArrowUpRight, WalletCards, Upload, Pencil, Download } from 'lucide-react';
+import { Building, KeyRound, DollarSign, Calendar, CalendarDays, TrendingUp, Plus, Users, ChevronLeft, ChevronRight, Phone, User as UserIcon, CheckCircle2, X, Trash2, Clock, Percent, Filter, LayoutGrid, Search, Table, BedDouble, AlertTriangle, Wrench, FileDown, Printer, ArrowUpRight, WalletCards, Upload, Pencil, Download } from 'lucide-react';
 import TopNavbar from './TopNavbar';
 import ConfirmDialog from './ConfirmDialog';
 import { Project, Language, RentalBooking, RentalBookingStatus, RentalCalendarBlock } from '../types';
@@ -19,6 +19,15 @@ import {
 import { LegacyRentalManifest, mergeLegacyRentalManifest, parseLegacyRentalManifest } from '../utils/rentalLegacyImport';
 import { parseRentalTabularFiles } from '../utils/rentalTabularImport';
 import { rentalText } from '../utils/rentalTranslations';
+import {
+  buildMonthGrid,
+  groupRentalDays,
+  monthKeyOf,
+  monthLabel,
+  shiftMonthKey,
+  weekdayLabels,
+} from '../utils/calendar';
+import { clampCommission, formErrorText, isValidEmail } from '../utils/forms';
 import DatePickerInput from './ui/DatePickerInput';
 import { appDateKey as localDateKey } from '../utils/dateTime';
 import { downloadRentalCalendar } from '../utils/rentalCalendarExport';
@@ -37,6 +46,7 @@ interface RentalDashboardProps {
   sidebarToggleLabel?: string;
   unreadCount?: number;
   onToggleNotifications?: () => void;
+  onOpenSearch?: () => void;
 }
 
 const currentMonthKey = () => localDateKey().slice(0, 7);
@@ -69,6 +79,7 @@ export default function RentalDashboard({
   sidebarToggleLabel,
   unreadCount,
   onToggleNotifications,
+  onOpenSearch,
 }: RentalDashboardProps) {
   const { user } = useAuth();
   const [rentalProjects, setRentalProjects] = useState<Project[]>([]);
@@ -269,6 +280,7 @@ export default function RentalDashboard({
         onCreateProject={() => setShowCreateForm(true)}
         unreadCount={unreadCount}
         onToggleNotifications={onToggleNotifications}
+        onOpenSearch={onOpenSearch}
         langLabel={rentalText(language, 'Language', 'Langue')}
       />
       <div className="mx-auto w-full max-w-7xl flex-1 px-4 pb-8 pt-5 sm:px-6 lg:px-8">
@@ -396,7 +408,7 @@ export default function RentalDashboard({
               <AlertTriangle className="h-4 w-4 text-amber-400" />
               <h2 className="text-xs font-bold">{rentalText(language, 'Needs attention', 'A surveiller')}</h2>
             </div>
-            <div className="mt-4 grid grid-cols-3 gap-4">
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div>
                 <p className="text-[10px] font-bold uppercase text-slate-400">{rentalText(language, 'Guest balance', 'Solde clients')}</p>
                 <p className="mt-1 font-mono text-lg font-bold text-amber-600 dark:text-amber-300">{operationalStats.outstanding.toLocaleString()} DH</p>
@@ -894,6 +906,9 @@ function RentalUnifiedCalendar({
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [cancelTarget, setCancelTarget] = useState<{ project: Project; block: RentalCalendarBlock } | null>(null);
+  /** Familiar month grid next to the occupancy matrix (same data, calendar layout). */
+  const [matrixView, setMatrixView] = useState(true);
+  const [selectedDay, setSelectedDay] = useState(() => localDateKey());
 
   const [year, monthNumber] = month.split('-').map(Number);
   const numberOfDays = new Date(year, monthNumber, 0).getDate();
@@ -988,7 +1003,25 @@ function RentalUnifiedCalendar({
             <span className="flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-sm bg-amber-500" />{rentalText(language, 'Maintenance', 'Maintenance')}</span>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <div className="flex items-center rounded-md border border-slate-200 bg-slate-50 p-0.5 dark:border-slate-800 dark:bg-slate-950">
+            <button
+              type="button"
+              onClick={() => setMatrixView(true)}
+              title={rentalText(language, 'Occupancy matrix', 'Matrice')}
+              className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-[11px] font-bold transition-colors ${matrixView ? 'bg-white text-teal-700 shadow-sm dark:bg-slate-800 dark:text-teal-300' : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'}`}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" />{rentalText(language, 'Matrix', 'Matrice')}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMatrixView(false)}
+              title={rentalText(language, 'Month calendar', 'Calendrier mensuel')}
+              className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-[11px] font-bold transition-colors ${!matrixView ? 'bg-white text-teal-700 shadow-sm dark:bg-slate-800 dark:text-teal-300' : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'}`}
+            >
+              <CalendarDays className="h-3.5 w-3.5" />{rentalText(language, 'Month', 'Mois')}
+            </button>
+          </div>
           <button type="button" onClick={() => downloadRentalCalendar(projects, `rentals-${month}.ics`)} className="flex h-9 items-center justify-center gap-1.5 rounded-md border border-slate-200 px-3 text-xs font-bold text-slate-700 dark:border-slate-700 dark:text-slate-200"><Download className="h-4 w-4" />ICS</button>
         {selectableProjects.length > 0 && (
           <button type="button" onClick={openBlockForm} className="flex h-9 items-center justify-center gap-1.5 rounded-md bg-violet-600 px-3 text-xs font-bold text-white hover:bg-violet-700">
@@ -998,6 +1031,7 @@ function RentalUnifiedCalendar({
         </div>
       </div>
 
+      {matrixView ? (
       <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
         <table className="min-w-max border-collapse text-[10px]">
           <thead className="sticky top-0 z-10 bg-slate-50 dark:bg-slate-950">
@@ -1039,6 +1073,18 @@ function RentalUnifiedCalendar({
         </table>
         {projects.length === 0 && <p className="p-10 text-center text-xs text-slate-400">{rentalText(language, 'Add a property to start the calendar.', 'Ajoutez un bien pour commencer.')}</p>}
       </div>
+      ) : (
+        <RentalMonthCalendar
+          projects={projects}
+          language={language}
+          monthKey={month}
+          selectedDay={selectedDay}
+          onSelectDay={setSelectedDay}
+          onSelectMonth={setMonth}
+          onOpenProject={onOpenProject}
+          onCancelBlock={(project, block) => canManage(project) && setCancelTarget({ project, block })}
+        />
+      )}
 
       {showBlockForm && (
         <div className="fixed inset-0 z-[170] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && !saving && setShowBlockForm(false)}>
@@ -1069,6 +1115,234 @@ function RentalUnifiedCalendar({
         onCancel={() => !saving && setCancelTarget(null)}
       />
     </section>
+  );
+}
+
+/**
+ * Familiar month-grid calendar for rentals: guest arrivals, departures, cleanings
+ * due, and holds/maintenance per day, with a tap-to-inspect agenda. Same data as
+ * the occupancy matrix, in the layout people expect from a calendar.
+ */
+function RentalMonthCalendar({
+  projects,
+  language,
+  monthKey,
+  selectedDay,
+  onSelectDay,
+  onSelectMonth,
+  onOpenProject,
+  onCancelBlock,
+}: {
+  projects: Project[];
+  language: Language;
+  monthKey: string;
+  selectedDay: string;
+  onSelectDay: (dateKey: string) => void;
+  onSelectMonth: (monthKey: string) => void;
+  onOpenProject: (projectId: string) => void;
+  onCancelBlock: (project: Project, block: RentalCalendarBlock) => void;
+}) {
+  const todayKey = localDateKey();
+  const days = buildMonthGrid(monthKey, todayKey);
+  const byDate = groupRentalDays(
+    projects.flatMap((project) =>
+      (project.rentalBookings || []).map((booking) => ({
+        booking,
+        projectId: project.id,
+        projectName: project.rentalProperty?.buildingNumber || project.name,
+      }))
+    ),
+    projects.flatMap((project) =>
+      (project.rentalCalendarBlocks || []).map((block) => ({
+        block,
+        projectId: project.id,
+        projectName: project.rentalProperty?.buildingNumber || project.name,
+      }))
+    )
+  );
+  const agenda = byDate.get(selectedDay);
+
+  const chip = (key: string, label: string, className: string, title: string) => (
+    <span key={key} title={title} className={`block truncate rounded px-1 py-px text-[8px] font-bold leading-tight ${className}`}>
+      {label}
+    </span>
+  );
+
+  return (
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
+      <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900 lg:col-span-3">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => onSelectMonth(shiftMonthKey(monthKey, -1))}
+              aria-label={rentalText(language, 'Previous month', 'Mois precedent')}
+              className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => { onSelectMonth(monthKeyOf(todayKey)); onSelectDay(todayKey); }}
+              className="rounded-md px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              {rentalText(language, 'Today', "Aujourd'hui")}
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelectMonth(shiftMonthKey(monthKey, 1))}
+              aria-label={rentalText(language, 'Next month', 'Mois suivant')}
+              className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+          <span className="text-sm font-bold capitalize text-slate-900 dark:text-white">
+            {monthLabel(monthKey, language)}
+          </span>
+        </div>
+        <div className="grid grid-cols-7 gap-1 text-center">
+          {weekdayLabels(language).map((label) => (
+            <span key={label} className="py-1 text-[9px] font-bold uppercase tracking-wider text-slate-400">
+              {label}
+            </span>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {days.map((day) => {
+            const entry = byDate.get(day.dateKey);
+            const chips: React.ReactNode[] = [];
+            entry?.arrivals.slice(0, 2).forEach((stay) =>
+              chips.push(chip(`a-${stay.bookingId}`, `→ ${stay.guestName}`, 'bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300', `${rentalText(language, 'Arrival', 'Arrivee')}: ${stay.guestName} · ${stay.projectName}`))
+            );
+            entry?.departures.slice(0, 2).forEach((stay) =>
+              chips.push(chip(`d-${stay.bookingId}`, `← ${stay.guestName}`, 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300', `${rentalText(language, 'Departure', 'Depart')}: ${stay.guestName} · ${stay.projectName}`))
+            );
+            entry?.cleanings.slice(0, 1).forEach((stay) =>
+              chips.push(chip(`c-${stay.bookingId}`, `✦ ${stay.projectName}`, 'bg-violet-100 text-violet-800 dark:bg-violet-950/60 dark:text-violet-300', `${rentalText(language, 'Cleaning due', 'Menage a faire')}: ${stay.projectName}`))
+            );
+            entry?.blocks.slice(0, 1).forEach((block) =>
+              chips.push(chip(`b-${block.blockId}`, block.title, 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300', `${block.title} · ${block.projectName}`))
+            );
+            const overflow =
+              (entry ? entry.arrivals.length + entry.departures.length + entry.cleanings.length + entry.blocks.length : 0) - chips.length;
+            const isSelected = day.dateKey === selectedDay;
+            return (
+              <button
+                key={day.dateKey}
+                type="button"
+                onClick={() => {
+                  onSelectDay(day.dateKey);
+                  if (day.dateKey.slice(0, 7) !== monthKey) onSelectMonth(monthKeyOf(day.dateKey));
+                }}
+                className={`flex min-h-14 flex-col rounded-lg border px-1 py-1 text-left transition-colors sm:min-h-16 ${
+                  isSelected
+                    ? 'border-teal-500 bg-teal-50/60 dark:border-teal-500 dark:bg-teal-950/30'
+                    : 'border-slate-100 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800/60 dark:hover:border-slate-700 dark:hover:bg-slate-950/50'
+                } ${day.inMonth ? '' : 'opacity-40'}`}
+              >
+                <span className={`flex h-5 w-5 items-center justify-center rounded-full font-mono text-[10px] ${day.isToday ? 'bg-slate-900 font-bold text-white dark:bg-slate-100 dark:text-slate-900' : 'text-slate-500 dark:text-slate-400'}`}>
+                  {day.dayNumber}
+                </span>
+                <span className="mt-0.5 space-y-0.5">
+                  {chips}
+                  {overflow > 0 && (
+                    <span className="block px-1 font-mono text-[8px] font-bold text-slate-400">+{overflow}</span>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-slate-400">
+          <span className="flex items-center gap-1"><span className="font-bold text-sky-600">→</span>{rentalText(language, 'Arrival', 'Arrivee')}</span>
+          <span className="flex items-center gap-1"><span className="font-bold text-amber-600">←</span>{rentalText(language, 'Departure', 'Depart')}</span>
+          <span className="flex items-center gap-1"><span className="font-bold text-violet-600">✦</span>{rentalText(language, 'Cleaning', 'Menage')}</span>
+          <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-slate-300 dark:bg-slate-600" />{rentalText(language, 'Hold / maintenance', 'Option / maintenance')}</span>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-950/50 lg:col-span-2">
+        <p className="mb-2 font-mono text-xs font-bold text-slate-700 dark:text-slate-200">{selectedDay}</p>
+        {!agenda || (agenda.arrivals.length + agenda.departures.length + agenda.cleanings.length + agenda.blocks.length === 0) ? (
+          <p className="py-6 text-center text-[11px] text-slate-400">
+            {rentalText(language, 'Nothing scheduled this day.', 'Rien de prevu ce jour.')}
+          </p>
+        ) : (
+          <ul className="max-h-80 space-y-1.5 overflow-y-auto">
+            {agenda.arrivals.map((stay) => (
+              <li key={`a-${stay.bookingId}`}>
+                <button
+                  type="button"
+                  onClick={() => onOpenProject(stay.projectId)}
+                  className="flex w-full items-center gap-2 rounded-lg border border-sky-200/70 bg-white px-2.5 py-1.5 text-left hover:border-sky-300 dark:border-sky-900/50 dark:bg-slate-900"
+                >
+                  <span className="font-bold text-sky-600">→</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-bold text-slate-800 dark:text-slate-100">{stay.guestName}</span>
+                    <span className="block truncate text-[10px] text-slate-400">{rentalText(language, 'Arrival', 'Arrivee')} · {stay.projectName}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+            {agenda.departures.map((stay) => (
+              <li key={`d-${stay.bookingId}`}>
+                <button
+                  type="button"
+                  onClick={() => onOpenProject(stay.projectId)}
+                  className="flex w-full items-center gap-2 rounded-lg border border-amber-200/70 bg-white px-2.5 py-1.5 text-left hover:border-amber-300 dark:border-amber-900/50 dark:bg-slate-900"
+                >
+                  <span className="font-bold text-amber-600">←</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-bold text-slate-800 dark:text-slate-100">{stay.guestName}</span>
+                    <span className="block truncate text-[10px] text-slate-400">{rentalText(language, 'Departure', 'Depart')} · {stay.projectName}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+            {agenda.cleanings.map((stay) => (
+              <li key={`c-${stay.bookingId}`}>
+                <button
+                  type="button"
+                  onClick={() => onOpenProject(stay.projectId)}
+                  className="flex w-full items-center gap-2 rounded-lg border border-violet-200/70 bg-white px-2.5 py-1.5 text-left hover:border-violet-300 dark:border-violet-900/50 dark:bg-slate-900"
+                >
+                  <span className="font-bold text-violet-600">✦</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-bold text-slate-800 dark:text-slate-100">{stay.projectName}</span>
+                    <span className="block truncate text-[10px] text-slate-400">{rentalText(language, 'Cleaning due', 'Menage a faire')} · {stay.guestName}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+            {agenda.blocks.map((block) => {
+              const target = projects
+                .find((item) => item.id === block.projectId)
+                ?.rentalCalendarBlocks?.find((item) => item.id === block.blockId);
+              const project = projects.find((item) => item.id === block.projectId);
+              return (
+                <li key={`b-${block.blockId}`} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900">
+                  <span className="h-2 w-2 shrink-0 rounded-sm bg-slate-300 dark:bg-slate-600" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-bold text-slate-800 dark:text-slate-100">{block.title}</span>
+                    <span className="block truncate text-[10px] text-slate-400">{block.projectName}</span>
+                  </span>
+                  {project && target && (
+                    <button
+                      type="button"
+                      onClick={() => onCancelBlock(project, target)}
+                      className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold text-slate-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30"
+                    >
+                      {rentalText(language, 'Cancel', 'Annuler')}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1413,7 +1687,7 @@ function OwnerReportModal({
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-2 sm:p-5">
           {finalizeError && <p className="no-print mx-auto mb-3 max-w-[190mm] rounded-md bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">{finalizeError}</p>}
-          <article id="printable-civil-bill" className="print-page-a4 mx-auto min-h-[277mm] min-w-[46rem] max-w-[190mm] bg-white p-8 text-slate-900 shadow-sm print:min-w-0">
+          <article id="printable-civil-bill" className="print-page-a4 mx-auto min-h-[277mm] w-full max-w-[190mm] bg-white p-4 text-slate-900 shadow-sm sm:p-8 print:w-auto print:min-w-[46rem] print:p-8">
             <header className="flex items-start justify-between border-b-2 border-slate-900 pb-5">
               <div>
                 <p className="text-[10px] font-bold uppercase text-teal-700">{rentalText(language, 'Rental management', 'Gestion locative')}</p>
@@ -1439,7 +1713,8 @@ function OwnerReportModal({
                     <div><h2 className="text-xs font-bold">{line.project.rentalProperty?.buildingNumber || line.project.name}</h2><p className="text-[9px] text-slate-500">{line.project.address}</p></div>
                     <div className="text-right"><p className="font-mono text-xs font-bold">{line.closingBalance.toLocaleString()} {line.project.currency}</p><p className={`text-[8px] font-bold uppercase ${line.finalized ? 'text-emerald-600' : 'text-amber-600'}`}>{line.finalized ? rentalText(language, 'Finalized', 'Finalise') : rentalText(language, 'Live draft', 'Brouillon')}</p></div>
                   </div>
-                  <table className="w-full text-left text-[9px]">
+                  <div className="overflow-x-auto">
+                  <table className="w-full min-w-[540px] text-left text-[9px]">
                     <thead className="border-b border-slate-200 uppercase text-slate-400"><tr><th className="px-2 py-1.5">{rentalText(language, 'Type', 'Type')}</th><th className="px-2 py-1.5">{rentalText(language, 'Detail', 'Détail')}</th><th className="px-2 py-1.5">{rentalText(language, 'Period', 'Periode')}</th><th className="px-2 py-1.5 text-right">{rentalText(language, 'Amount', 'Montant')}</th></tr></thead>
                     <tbody className="divide-y divide-slate-100">
                       {line.bookings.map(({ booking, nights, amount, commission, commissionRate, cleaning }) => <React.Fragment key={booking.id}><tr><td className="px-2 py-1.5 font-bold text-teal-700">{rentalText(language, 'Stay', 'Sejour')}</td><td className="px-2 py-1.5">{booking.clientName} · {nights} {rentalText(language, 'nights', 'nuits')}</td><td className="px-2 py-1.5 font-mono">{booking.checkIn} - {booking.checkOut}</td><td className="px-2 py-1.5 text-right font-mono font-bold">{amount.toLocaleString()} {line.project.currency}</td></tr><tr><td className="px-2 py-1.5 font-bold text-emerald-700">{rentalText(language, 'Commission', 'Commission')}</td><td className="px-2 py-1.5">{commissionRate}% · {booking.clientName}</td><td className="px-2 py-1.5" /><td className="px-2 py-1.5 text-right font-mono text-emerald-700">-{commission.toLocaleString()} {line.project.currency}</td></tr>{cleaning > 0 && <tr><td className="px-2 py-1.5 font-bold text-amber-700">{rentalText(language, 'Cleaning', 'Menage')}</td><td className="px-2 py-1.5">{booking.clientName}</td><td className="px-2 py-1.5" /><td className="px-2 py-1.5 text-right font-mono text-amber-700">-{cleaning.toLocaleString()} {line.project.currency}</td></tr>}</React.Fragment>)}
@@ -1449,7 +1724,8 @@ function OwnerReportModal({
                       {line.bookings.length + line.expenses.length + line.services.length + line.payments.length === 0 && <tr><td colSpan={4} className="px-2 py-5 text-center text-slate-400">{rentalText(language, 'No activity this month.', 'Aucune activite ce mois.')}</td></tr>}
                     </tbody>
                   </table>
-                  <div className="mt-1 flex justify-end gap-5 text-[9px]"><span>{rentalText(language, 'Opening', 'Ouverture')}: <strong>{line.openingBalance.toLocaleString()}</strong></span><span>{rentalText(language, 'Gross', 'Brut')}: <strong>{line.revenue.toLocaleString()}</strong></span><span>{rentalText(language, 'Commission', 'Commission')}: <strong>{line.commission.toLocaleString()}</strong></span><span>{rentalText(language, 'Costs', 'Frais')}: <strong>{(line.cleaningTotal + line.expenseTotal).toLocaleString()}</strong></span><span>{rentalText(language, 'Paid', 'Verse')}: <strong>{line.paidTotal.toLocaleString()}</strong></span><span>{rentalText(language, 'Closing', 'Cloture')}: <strong>{line.closingBalance.toLocaleString()}</strong></span></div>
+                  </div>
+                  <div className="mt-1 flex flex-wrap justify-end gap-x-5 gap-y-1 text-[9px]"><span>{rentalText(language, 'Opening', 'Ouverture')}: <strong>{line.openingBalance.toLocaleString()}</strong></span><span>{rentalText(language, 'Gross', 'Brut')}: <strong>{line.revenue.toLocaleString()}</strong></span><span>{rentalText(language, 'Commission', 'Commission')}: <strong>{line.commission.toLocaleString()}</strong></span><span>{rentalText(language, 'Costs', 'Frais')}: <strong>{(line.cleaningTotal + line.expenseTotal).toLocaleString()}</strong></span><span>{rentalText(language, 'Paid', 'Verse')}: <strong>{line.paidTotal.toLocaleString()}</strong></span><span>{rentalText(language, 'Closing', 'Cloture')}: <strong>{line.closingBalance.toLocaleString()}</strong></span></div>
                 </section>
               ))}
             </div>
@@ -1583,10 +1859,29 @@ function CreateRentalForm({ language, t, user, onClose, onCreated }: {
   const [ownerPhone, setOwnerPhone] = useState('');
   const [ownerEmail, setOwnerEmail] = useState('');
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !ownerName.trim() || !buildingNumber.trim() || !pricePerNight || !user?.uid || !user.email) return;
+    if (!name.trim() || !ownerName.trim() || !buildingNumber.trim() || !user?.uid || !user.email) {
+      setFormError(rentalText(language, 'Property name, owner, and building are required.', 'Nom du bien, propriétaire et immeuble requis.'));
+      return;
+    }
+    if (!Number.isFinite(pricePerNight) || pricePerNight <= 0) {
+      setFormError(rentalText(language, 'Enter a nightly price greater than zero.', 'Saisissez un prix par nuit supérieur à zéro.'));
+      return;
+    }
+    const commission = clampCommission(commissionRate);
+    if (!Number.isFinite(commissionRate) || commission !== commissionRate) {
+      setCommissionRate(commission);
+      setFormError(formErrorText('invalid_commission', language));
+      return;
+    }
+    if (ownerEmail.trim() && !isValidEmail(ownerEmail)) {
+      setFormError(formErrorText('invalid_email', language));
+      return;
+    }
+    setFormError(null);
     setSaving(true);
 
     const projectId = `proj_${Date.now()}`;
@@ -1641,6 +1936,11 @@ function CreateRentalForm({ language, t, user, onClose, onCreated }: {
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 cursor-pointer p-1"><X className="w-4 h-4" /></button>
         </div>
         <form onSubmit={handleSubmit} className="mt-3.5 min-h-0 flex-1 space-y-3.5 overflow-y-auto pr-1">
+          {formError && (
+            <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+              {formError}
+            </p>
+          )}
           <div>
             <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{language === 'en' ? 'Property Name' : language === 'fr' ? 'Nom du bien' : 'اسم العقار'}</label>
             <input required type="text" value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
@@ -1660,15 +1960,15 @@ function CreateRentalForm({ language, t, user, onClose, onCreated }: {
             </div>
             <div>
               <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{language === 'en' ? 'Owner Email' : language === 'fr' ? 'Email propriétaire' : 'بريد المالك'}</label>
-              <input type="email" value={ownerEmail} onChange={e => setOwnerEmail(e.target.value)} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
+              <input type="email" value={ownerEmail} onChange={e => { setOwnerEmail(e.target.value); setFormError(null); }} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400" />
             </div>
             <div>
               <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.pricePerNight}</label>
-              <input required type="number" min={0} value={pricePerNight || ''} onChange={e => setPricePerNight(Number(e.target.value))} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono" />
+              <input required type="number" min={0} value={pricePerNight || ''} onChange={e => { setPricePerNight(Number(e.target.value)); setFormError(null); }} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono" />
             </div>
             <div>
               <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{t.rental.commissionRate}</label>
-              <input type="number" min={0} step="0.01" value={commissionRate} onChange={e => setCommissionRate(Math.max(0, Number(e.target.value) || 0))} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono font-semibold" />
+              <input type="number" min={0} max={100} step="0.01" value={commissionRate} onChange={e => { setCommissionRate(clampCommission(Number(e.target.value))); setFormError(null); }} className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-slate-400 font-mono font-semibold" />
             </div>
           </div>
           <div className="pt-3.5 flex justify-end gap-2 border-t border-slate-100 dark:border-slate-800">

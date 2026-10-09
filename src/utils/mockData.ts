@@ -1,4 +1,5 @@
 import { Project, TimelineActivity, AppNotification, Language } from '../types';
+import { acceptedMembers, expenseInvoicePrice, projectSpent } from './projectFinance';
 
 // Multi-language translation dictionaries
 export const TRANSLATIONS = {
@@ -764,19 +765,22 @@ export function calculateSettlements(project: Project): {
   expectedShares: Record<string, number>;
   settlements: Settlement[];
 } {
-  const totalSpent = project.expenses.reduce((sum, exp) => sum + exp.amount, 0);
-  const members = project.members;
+  const totalSpent = projectSpent(project);
+  // Only accepted members share costs — pending/declined invites must not
+  // silently shrink everyone's equal share.
+  const members = acceptedMembers(project);
   const numMembers = members.length;
-  
-  // Track actual amount paid by each member
+
+  // Track actual amount paid by each member (commission-inclusive invoice price)
   const paidMap: Record<string, number> = {};
   members.forEach(m => { paidMap[m.email] = 0; });
   project.expenses.forEach(exp => {
+    const price = expenseInvoicePrice(exp);
     if (paidMap[exp.paidBy] !== undefined) {
-      paidMap[exp.paidBy] += exp.amount;
+      paidMap[exp.paidBy] += price;
     } else {
       // If someone paid who is not in current active members list
-      paidMap[exp.paidBy] = exp.amount;
+      paidMap[exp.paidBy] = price;
     }
   });
 
@@ -797,9 +801,7 @@ export function calculateSettlements(project: Project): {
     });
   }
 
-  // Calculate expected shares. In standard renovation setup, expenses are divided equally among active shared contributors.
-  // Wait, let's divide among members who can write/edit (or divide evenly among ALL project members for simplicity, which matches "partner paid $300, engineer paid $500, system automatically calculates balance owed").
-  // Let's divide equally among the members of the project.
+  // Calculate expected shares, split equally among accepted members only.
   const expectedShare = numMembers > 0 ? (totalSpent / numMembers) : 0;
   const expectedShares: Record<string, number> = {};
   members.forEach(m => {

@@ -75,7 +75,6 @@ export default defineConfig(() => {
       warmup: {
         clientFiles: [
           './src/App.tsx',
-          './src/components/OperationsDirectory.tsx',
           './src/components/ProjectDetail.tsx',
           './src/components/ConstructionOperationsCenter.tsx',
         ],

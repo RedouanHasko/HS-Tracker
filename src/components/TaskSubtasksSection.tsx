@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Check, Plus, Trash2, ListChecks } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Subtask } from '../types';
+import { Language, Subtask } from '../types';
 import { createSubtask } from '../utils/taskHelpers';
 import type { TaskDetailLabels } from '../utils/taskHelpers';
 
@@ -9,6 +9,7 @@ interface TaskSubtasksSectionProps {
   subtasks: Subtask[];
   canEdit: boolean;
   labels: TaskDetailLabels;
+  language?: Language;
   onChange: (subtasks: Subtask[]) => void;
   /** When set, removing a subtask opens a confirmation first */
   onRequestRemove?: (subtaskId: string, title: string) => void;
@@ -21,6 +22,7 @@ export default function TaskSubtasksSection({
   subtasks,
   canEdit,
   labels,
+  language = 'en',
   onChange,
   onRequestRemove,
 }: TaskSubtasksSectionProps) {
@@ -89,14 +91,15 @@ export default function TaskSubtasksSection({
                 type="button"
                 disabled={!canEdit}
                 onClick={() => toggle(sub.id)}
-                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-all ${
+                style={{ width: 22, height: 22 }}
+                className={`flex shrink-0 grow-0 basis-auto items-center justify-center self-center rounded-[7px] border-2 transition-all ${
                   sub.isCompleted
-                    ? 'border-teal-500 bg-teal-500 text-white'
-                    : 'border-slate-300 bg-white dark:border-slate-600 dark:bg-slate-900'
-                } ${canEdit ? 'cursor-pointer hover:border-cyan-400' : 'cursor-default opacity-80'}`}
+                    ? 'border-teal-500 bg-teal-500 text-white shadow-sm'
+                    : 'border-slate-300 bg-white hover:border-cyan-400 hover:shadow-sm dark:border-slate-600 dark:bg-slate-900'
+                } ${canEdit ? 'cursor-pointer' : 'cursor-default opacity-80'}`}
                 aria-label={sub.isCompleted ? 'Completed' : 'Mark complete'}
               >
-                {sub.isCompleted && <Check className="h-3 w-3 stroke-[3]" />}
+                {sub.isCompleted && <Check className="h-3.5 w-3.5" strokeWidth={3.5} />}
               </button>
               <span
                 className={`min-w-0 flex-1 text-sm ${
@@ -109,9 +112,11 @@ export default function TaskSubtasksSection({
                 <button
                   type="button"
                   onClick={() => remove(sub.id)}
-                  className="rounded p-1 text-slate-300 opacity-0 transition-all hover:text-red-500 group-hover:opacity-100"
+                  aria-label={language === 'fr' ? 'Supprimer' : 'Delete subtask'}
+                  title={language === 'fr' ? 'Supprimer' : 'Delete subtask'}
+                  className="rounded p-1.5 text-slate-400 transition-all hover:bg-red-50 hover:text-red-500 active:bg-red-100 active:text-red-600 dark:hover:bg-red-950/30 sm:p-1 sm:text-slate-300 sm:opacity-0 sm:group-hover:opacity-100"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
                 </button>
               )}
             </motion.li>

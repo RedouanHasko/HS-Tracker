@@ -75,7 +75,9 @@ service cloud.firestore {
           && ('storageVersion' in data ? data.storageVersion == 1 || data.storageVersion == 2 : true)
           && ('recordRevision' in data ? valString(data.recordRevision, 50) : true)
           && ('recordCounts' in data ? data.recordCounts is map : true)
-          && ('rentalProperty' in data ? isValidRentalProperty(data.rentalProperty) : true);
+          && ('rentalProperty' in data
+            ? data.rentalProperty == null || isValidRentalProperty(data.rentalProperty)
+            : true);
     }
 
     function isValidInvitation(data) {
@@ -217,7 +219,16 @@ service cloud.firestore {
       return role == 'owner' || role == 'co_owner' || role == 'manager';
     }
 
-    // Pending invitee accepting or declining — may update members + access lists only
+    // Pending invitee accepting or declining — may update members + access lists only.
+    // The app writes a surgical updateDoc with exactly the keys below (never the role
+    // map, never recordRevision/records), so both accept and decline stay provable here.
+    function inviteePatchKeys(patchKeys) {
+      return (patchKeys.hasAll(['members', 'memberEmails', 'invitedEmails']) && patchKeys.size() == 3)
+          || (patchKeys.hasAll(['members', 'invitedEmails']) && patchKeys.size() == 2)
+          || patchKeys.hasOnly(['members', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
+          || patchKeys.hasOnly(['members', 'memberRoleByEmail', 'invitedEmails']);
+    }
+
     function isInviteeMembershipPatch() {
       let patchKeys = request.resource.data.diff(resource.data).affectedKeys();
       return isInvitedToProject(resource.data)
@@ -229,10 +240,7 @@ service cloud.firestore {
             || request.resource.data.get('memberEmails', [])
               == resource.data.get('memberEmails', [])
           )
-          && (
-            patchKeys.hasOnly(['members', 'memberEmails', 'memberRoleByEmail', 'invitedEmails'])
-            || patchKeys.hasOnly(['members', 'memberRoleByEmail', 'invitedEmails'])
-          );
+          && inviteePatchKeys(patchKeys);
     }
 
     function canUpdateProjectByRole() {

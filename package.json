@@ -12,7 +12,7 @@
     "test:rental": "tsx --test tests/rentalAccounting.test.ts",
     "test:ai": "tsx --test tests/aiActions.test.ts",
     "test:backup": "tsx --test tests/systemBackup.test.ts",
-    "test:unit": "tsx --test tests/rentalAccounting.test.ts tests/aiActions.test.ts tests/systemBackup.test.ts tests/dateTime.test.ts tests/projectStorage.test.ts",
+    "test:unit": "tsx --test tests/rentalAccounting.test.ts tests/aiActions.test.ts tests/systemBackup.test.ts tests/dateTime.test.ts tests/projectStorage.test.ts tests/taskState.test.ts tests/invitations.test.ts tests/forms.test.ts tests/quotes.test.ts tests/calendar.test.ts tests/voice.test.ts",
     "test:rules": "firebase emulators:exec --config firebase.test.json --project demo-hs-tracker --only firestore \"node --test tests/firestore.rules.test.mjs\"",
     "audit:deps": "npm audit --omit=dev --audit-level=high",
     "verify": "npm run lint && npm run test:unit && npm run test:rules && npm run build && npm run audit:deps",

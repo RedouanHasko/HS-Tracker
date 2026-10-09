@@ -9,9 +9,14 @@ import {
   Loader2,
   CheckCircle2,
   Lock,
+  AlertTriangle,
+  Ban,
+  Flag,
 } from 'lucide-react';
 import { Task, Language, Project, ProjectMember } from '../types';
 import { categoryLabel, normalizeTask, taskTotalCost, subtaskProgress } from '../utils/taskHelpers';
+import { completionBlocker, isTaskBlocked, isTaskOverdue, taskOwnerEmail } from '../utils/taskState';
+import { appDateKey } from '../utils/dateTime';
 
 type TaskStatus = Task['status'];
 
@@ -63,9 +68,13 @@ interface TaskKanbanBoardProps {
   canEdit: boolean;
   canEditTask: (task: Task) => boolean;
   canDeleteTask: (task: Task) => boolean;
+  /** Why a task is locked for this user (null when editable). */
+  editDenialReason: (task: Task) => string | null;
   onStatusChange: (taskId: string, status: TaskStatus) => void;
   onOpenTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
+  /** Explains a refused status change (e.g. unmet dependencies) instead of failing silently. */
+  onBlockedStatusChange?: (reason: string) => void;
   /** Element id to pulse when AI navigates here (e.g. task-card-xxx) */
   focusElementId?: string | null;
 }
@@ -88,7 +97,9 @@ function KanbanCard({
   onDelete,
   taskEditable,
   taskDeletable,
+  lockReason,
   isFocused,
+  todayKey,
 }: {
   task: Task;
   member?: ProjectMember;
@@ -100,13 +111,18 @@ function KanbanCard({
   onDelete: () => void;
   taskEditable: boolean;
   taskDeletable: boolean;
+  lockReason: string | null;
   isFocused?: boolean;
+  todayKey: string;
 }) {
   const normalized = normalizeTask(task);
   const photoCount =
     (normalized.beforeImages?.length || 0) + (normalized.afterImages?.length || 0);
   const taskCost = taskTotalCost(normalized);
   const { done: subDone, total: subTotal } = subtaskProgress(normalized);
+  const overdue = isTaskOverdue(normalized, todayKey);
+  const blocked = isTaskBlocked(normalized);
+  const ownerEmail = taskOwnerEmail(normalized);
 
   return (
     <div
@@ -125,16 +141,53 @@ function KanbanCard({
         )}
         <div className="min-w-0 flex-1">
           <div className="mb-1.5 flex items-start justify-between gap-2">
-            <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-600 dark:bg-slate-800 dark:text-slate-400">
-              <span className={`h-1.5 w-1.5 rounded-full ${priorityDot(task.priority)}`} />
-              {categoryLabel(task.workCategory, language)}
-            </span>
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-600 dark:bg-slate-800 dark:text-slate-400">
+                <span className={`h-1.5 w-1.5 rounded-full ${priorityDot(task.priority)}`} />
+                {categoryLabel(task.workCategory, language)}
+              </span>
+              {task.milestone && (
+                <span
+                  className="inline-flex items-center gap-0.5 rounded-md bg-violet-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-violet-800 dark:bg-violet-950/50 dark:text-violet-300"
+                  title={language === 'en' ? 'Milestone' : language === 'fr' ? 'Jalon' : 'محطة رئيسية'}
+                >
+                  <Flag className="h-2.5 w-2.5" />
+                  {language === 'en' ? 'Milestone' : language === 'fr' ? 'Jalon' : 'محطة'}
+                </span>
+              )}
+              {blocked && (
+                <span
+                  className="inline-flex max-w-[9rem] items-center gap-0.5 truncate rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-amber-900 dark:bg-amber-950/50 dark:text-amber-300"
+                  title={normalized.blockedReason || ''}
+                >
+                  <Ban className="h-2.5 w-2.5 shrink-0" />
+                  <span className="truncate">{normalized.blockedReason}</span>
+                </span>
+              )}
+              {overdue && (
+                <span
+                  className="inline-flex items-center gap-0.5 rounded-md bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-rose-800 dark:bg-rose-950/50 dark:text-rose-300"
+                  title={language === 'en' ? 'Past its deadline' : language === 'fr' ? 'Échéance dépassée' : 'تجاوز الموعد'}
+                >
+                  <AlertTriangle className="h-2.5 w-2.5" />
+                  {language === 'en' ? 'Overdue' : language === 'fr' ? 'Retard' : 'متأخر'}
+                </span>
+              )}
+            </div>
             <span className="flex shrink-0 items-center gap-0.5 text-[10px] font-mono text-slate-400">
               {!taskEditable && (
-                <Lock className="h-3 w-3 text-amber-500" title={language === 'en' ? 'Protected — view only' : 'Protégée'} />
+                <span
+                  className="inline-flex items-center gap-0.5 rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-amber-900 dark:bg-amber-950/50 dark:text-amber-300"
+                  title={lockReason || ''}
+                >
+                  <Lock className="h-2.5 w-2.5" />
+                  {language === 'en' ? 'Locked' : language === 'fr' ? 'Verrouillé' : 'مقفل'}
+                </span>
               )}
-              <Calendar className="h-3 w-3" />
-              {task.deadline}
+              <Calendar className={`h-3 w-3 ${overdue ? 'text-rose-500' : ''}`} />
+              <span className={overdue ? 'font-bold text-rose-600 dark:text-rose-400' : ''}>
+                {task.baselineDeadline || task.deadline}
+              </span>
             </span>
           </div>
 
@@ -185,7 +238,7 @@ function KanbanCard({
                 {member?.name.charAt(0) || 'T'}
               </div>
               <span className="truncate text-[10px] font-medium text-slate-600 dark:text-slate-400">
-                {member?.name || task.assignedTo}
+                {member?.name || ownerEmail}
               </span>
             </div>
             <div className="flex items-center gap-0.5">
@@ -202,20 +255,30 @@ function KanbanCard({
                 <button
                   type="button"
                   onClick={onOpen}
-                  className="rounded-md p-1 text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800"
-                  title={language === 'en' ? 'View task' : language === 'fr' ? 'Voir' : 'عرض'}
+                  className="rounded-md p-1 text-slate-300 hover:bg-slate-50 dark:text-slate-600 dark:hover:bg-slate-800"
+                  title={lockReason || (language === 'en' ? 'View task' : language === 'fr' ? 'Voir' : 'عرض')}
                 >
                   <Eye className="h-3.5 w-3.5" />
                 </button>
               )}
-              {canEdit && taskDeletable && (
+              {canEdit && (
                 <button
                   type="button"
+                  disabled={!taskDeletable}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onDelete();
+                    if (taskDeletable) onDelete();
                   }}
-                  className="rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30"
+                  title={
+                    taskDeletable
+                      ? language === 'en' ? 'Delete task' : language === 'fr' ? 'Supprimer' : 'حذف المهمة'
+                      : lockReason || (language === 'en' ? 'You cannot delete this task' : language === 'fr' ? 'Vous ne pouvez pas supprimer cette tâche' : 'لا يمكنك حذف هذه المهمة')
+                  }
+                  className={`rounded-md p-1 ${
+                    taskDeletable
+                      ? 'text-slate-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/30 cursor-pointer'
+                      : 'cursor-not-allowed text-slate-200 dark:text-slate-700'
+                  }`}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
@@ -238,13 +301,16 @@ export default function TaskKanbanBoard({
   canEdit,
   canEditTask,
   canDeleteTask,
+  editDenialReason,
   onStatusChange,
   onOpenTask,
   onDeleteTask,
+  onBlockedStatusChange,
   focusElementId = null,
 }: TaskKanbanBoardProps) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragOverStatus, setDragOverStatus] = useState<TaskStatus | null>(null);
+  const todayKey = appDateKey();
 
   const getMember = (email: string) => project.members.find((m) => m.email === email);
 
@@ -275,7 +341,14 @@ export default function TaskKanbanBoard({
     if (taskId) {
       const task = tasks.find((t) => t.id === taskId);
       if (task && task.status !== status && canEditTask(task)) {
-        onStatusChange(taskId, status);
+        // Refuse silent completions: unmet dependencies or open subtasks must be reported.
+        const blocker =
+          status === 'completed' ? completionBlocker(task, tasks, language) : null;
+        if (blocker) {
+          onBlockedStatusChange?.(blocker);
+        } else {
+          onStatusChange(taskId, status);
+        }
       }
     }
     setDraggedId(null);
@@ -344,7 +417,7 @@ export default function TaskKanbanBoard({
                     >
                       <KanbanCard
                         task={task}
-                        member={getMember(task.assignedTo)}
+                        member={getMember(taskOwnerEmail(task))}
                         language={language}
                         currency={project.currency}
                         canEdit={canEdit}
@@ -353,7 +426,9 @@ export default function TaskKanbanBoard({
                         onDelete={() => onDeleteTask(task.id)}
                         taskEditable={taskEditable}
                         taskDeletable={taskDeletable}
+                        lockReason={editDenialReason(task)}
                         isFocused={focusElementId === `task-card-${task.id}`}
+                        todayKey={todayKey}
                       />
                     </div>
                     );

@@ -13,9 +13,9 @@ import {
   upsertNotification,
   markNotificationRead,
   updateInvitationStatusInDB,
-  getProjectFromDB,
-  saveProjectToDB,
   saveActivityToDB,
+  applyInviteeMembershipPatch,
+  InviteRevokedError,
 } from '../lib/db';
 import {
   syncTaskDeadlineReminders,
@@ -23,7 +23,6 @@ import {
   filterImportantNotifications,
 } from '../utils/notificationHelpers';
 import { countUnreadNotifications } from '../components/NotificationsPanel';
-import { buildActivityMemberEmails } from '../utils/activityHelpers';
 
 export function useAppNotifications(user: User | null, projects: Project[]) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -31,6 +30,8 @@ export function useAppNotifications(user: User | null, projects: Project[]) {
   const [showPanel, setShowPanel] = useState(false);
   const [pendingNav, setPendingNav] = useState<PendingNotificationNav | null>(null);
   const [highlightInvitationId, setHighlightInvitationId] = useState<string | null>(null);
+  /** Invitation currently being accepted/declined — disables its buttons against double taps. */
+  const [busyInvitationId, setBusyInvitationId] = useState<string | null>(null);
   const reminderSyncedRef = useRef<string>('');
 
   useEffect(() => {
@@ -111,79 +112,97 @@ export function useAppNotifications(user: User | null, projects: Project[]) {
 
   const onAcceptInvitation = useCallback(
     async (invite: Invitation) => {
-      if (!user?.uid) return;
+      if (!user?.uid || !user.email || busyInvitationId) return;
+      setBusyInvitationId(invite.id);
       try {
-        await updateInvitationStatusInDB(invite.id, 'accepted');
-        const project = await getProjectFromDB(user.uid, invite.projectId);
-        if (!project) return;
-
-        const cleanInviteeEmail = invite.inviteeEmail.toLowerCase();
-        let exists = false;
-        const updatedMembers = project.members.map((m) => {
-          if (m.email.toLowerCase() === cleanInviteeEmail) {
-            exists = true;
-            return {
-              ...m,
-              email: cleanInviteeEmail,
-              status: 'accepted' as const,
-              role: invite.role,
-              name: user.displayName || m.name,
-            };
-          }
-          return { ...m, email: m.email.toLowerCase() };
+        const email = user.email.toLowerCase();
+        const displayName = user.displayName || invite.inviteeEmail.split('@')[0];
+        // Membership FIRST: the invitee has no access to versioned records, so this
+        // uses a root-only read + surgical write the rules expressly allow. Flipping
+        // the invitation status only afterwards keeps a failed join retryable.
+        const { outcome, memberEmailsAfter } = await applyInviteeMembershipPatch({
+          projectId: invite.projectId,
+          email,
+          displayName,
+          role: invite.role,
+          decision: 'accept',
         });
-        if (!exists) {
-          updatedMembers.push({
-            email: cleanInviteeEmail,
-            name: user.displayName || invite.inviteeEmail.split('@')[0],
-            role: invite.role,
-            status: 'accepted',
-          });
+        // Consume the invitation (best-effort: membership already landed, retry heals).
+        try {
+          await updateInvitationStatusInDB(invite.id, 'accepted');
+        } catch (e) {
+          console.warn('Invitation status sync skipped:', e);
         }
-        const updatedProject = { ...project, members: updatedMembers };
-        await saveProjectToDB(user.uid, updatedProject);
-        await saveActivityToDB(user.uid, {
-          id: `act_${Date.now()}`,
-          projectId: invite.projectId,
-          userEmail: cleanInviteeEmail,
-          userName: user.displayName || cleanInviteeEmail.split('@')[0],
-          actionType: 'member_joined',
-          actionDetails: `${user.displayName || invite.inviteeEmail} joined as ${invite.role}.`,
-          timestamp: new Date().toISOString(),
-          memberEmails: buildActivityMemberEmails(updatedProject),
-        });
-        await upsertNotification(user.uid, {
-          id: `invite_${invite.id}`,
-          category: 'project_invitation',
-          read: true,
-          type: 'info',
-          projectId: invite.projectId,
-          projectName: invite.projectName,
-          text: `Joined ${invite.projectName}.`,
-          timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-        });
+        if (outcome === 'joined') {
+          // Join activity is informational — exact stored memberEmails keep rules happy.
+          try {
+            await saveActivityToDB(user.uid, {
+              id: `act_${Date.now()}`,
+              projectId: invite.projectId,
+              userEmail: email,
+              userName: displayName,
+              actionType: 'member_joined',
+              actionDetails: `${displayName} joined as ${invite.role}.`,
+              timestamp: new Date().toISOString(),
+              memberEmails: memberEmailsAfter,
+            });
+          } catch (e) {
+            console.warn('Join activity skipped:', e);
+          }
+        }
+        try {
+          await upsertNotification(user.uid, {
+            id: `invite_${invite.id}`,
+            category: 'project_invitation',
+            read: true,
+            type: 'info',
+            projectId: invite.projectId,
+            projectName: invite.projectName,
+            text: outcome === 'joined' ? `Joined ${invite.projectName}.` : `You're already a member of ${invite.projectName}.`,
+            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
+          });
+        } catch (e) {
+          console.warn('Join notification skipped:', e);
+        }
         setPendingNav({ projectId: invite.projectId, tab: 'overview' });
       } catch (e) {
         console.error('Accept invitation failed:', e);
-        window.alert('Could not join the project. Please try again or ask the project owner to re-invite you.');
+        if (e instanceof InviteRevokedError) {
+          try {
+            await updateInvitationStatusInDB(invite.id, 'declined');
+          } catch {
+            // Already gone — nothing left to consume.
+          }
+          window.alert('This invitation is no longer valid. Ask the project owner to send you a new one.');
+        } else {
+          window.alert('Could not join the project. Check your connection and try again — or ask the project owner to re-send the invitation.');
+        }
+      } finally {
+        setBusyInvitationId(null);
       }
     },
-    [user]
+    [user, busyInvitationId]
   );
 
   const onDeclineInvitation = useCallback(
     async (invite: Invitation) => {
-      if (!user?.uid) return;
+      if (!user?.uid || !user.email || busyInvitationId) return;
+      setBusyInvitationId(invite.id);
       try {
-        await updateInvitationStatusInDB(invite.id, 'declined');
-        const project = await getProjectFromDB(user.uid, invite.projectId);
-        if (project) {
-          const cleanInvitee = invite.inviteeEmail.toLowerCase();
-          const updatedMembers = project.members.map((m) =>
-            m.email.toLowerCase() === cleanInvitee ? { ...m, status: 'declined' as const } : m
-          );
-          await saveProjectToDB(user.uid, { ...project, members: updatedMembers });
+        // Membership lists first (root-only, rules-allowed), invitation status after.
+        try {
+          await applyInviteeMembershipPatch({
+            projectId: invite.projectId,
+            email: user.email.toLowerCase(),
+            displayName: user.displayName || invite.inviteeEmail.split('@')[0],
+            role: invite.role,
+            decision: 'decline',
+          });
+        } catch (e) {
+          if (!(e instanceof InviteRevokedError)) throw e;
+          // Already revoked owner-side — just consume the local invite below.
         }
+        await updateInvitationStatusInDB(invite.id, 'declined');
         await upsertNotification(user.uid, {
           id: `invite_${invite.id}`,
           read: true,
@@ -196,9 +215,11 @@ export function useAppNotifications(user: User | null, projects: Project[]) {
       } catch (e) {
         console.error('Decline invitation failed:', e);
         window.alert('Could not update the invitation. Please try again.');
+      } finally {
+        setBusyInvitationId(null);
       }
     },
-    [user]
+    [user, busyInvitationId]
   );
 
   const unreadCount = countUnreadNotifications(notifications, invitations);
@@ -213,6 +234,7 @@ export function useAppNotifications(user: User | null, projects: Project[]) {
     consumePendingNav,
     highlightInvitationId,
     setHighlightInvitationId,
+    busyInvitationId,
     handleMarkRead,
     handleMarkAllRead,
     handleNavigate,

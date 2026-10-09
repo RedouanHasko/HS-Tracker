@@ -28,6 +28,7 @@ import { Language, Project, UserProfile } from '../types';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useMotionConfig } from '../utils/motionPresets';
 import { downloadSystemBackup } from '../utils/systemBackup';
+import ConfirmDialog from './ConfirmDialog';
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -125,6 +126,7 @@ export default function ProfileModal({ isOpen, onClose, language, projects }: Pr
   const [migrationArmed, setMigrationArmed] = useState(false);
   const [migrationBusy, setMigrationBusy] = useState(false);
   const [migrationStatus, setMigrationStatus] = useState('');
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   const t = PROFILE_TRANSLATIONS[language] || PROFILE_TRANSLATIONS.en;
   const ownedLegacyProjects = useMemo(() => {
@@ -218,10 +220,9 @@ export default function ProfileModal({ isOpen, onClose, language, projects }: Pr
   };
 
   const handleLogout = async () => {
-    if (window.confirm(language === 'ar' ? 'هل أنت متأكد من رغبتك في تسجيل الخروج؟' : language === 'fr' ? 'Êtes-vous sûr de vouloir vous déconnecter ?' : 'Are you sure you want to sign out?')) {
-      onClose();
-      await signOut();
-    }
+    setShowLogoutConfirm(false);
+    onClose();
+    await signOut();
   };
 
   const prepareMigration = () => {
@@ -275,6 +276,7 @@ export default function ProfileModal({ isOpen, onClose, language, projects }: Pr
   const { modal, modalVariants, overlayVariants, overlay } = useMotionConfig();
 
   return (
+    <>
     <AnimatePresence>
       {isOpen && (
       <motion.div
@@ -569,7 +571,7 @@ export default function ProfileModal({ isOpen, onClose, language, projects }: Pr
                 </div>
                 <button
                   type="button"
-                  onClick={handleLogout}
+                  onClick={() => setShowLogoutConfirm(true)}
                   className="px-4 py-2 shrink-0 rounded-lg text-xs font-bold bg-red-600 hover:bg-red-500 text-white shadow-sm hover:shadow transition-all cursor-pointer flex items-center gap-2"
                 >
                   <LogOut className="w-3.5 h-3.5" />
@@ -583,5 +585,22 @@ export default function ProfileModal({ isOpen, onClose, language, projects }: Pr
       </motion.div>
       )}
     </AnimatePresence>
+    <ConfirmDialog
+      open={showLogoutConfirm}
+      language={language}
+      variant="default"
+      title={language === 'ar' ? 'تسجيل الخروج؟' : language === 'fr' ? 'Se déconnecter ?' : 'Sign out?'}
+      message={
+        language === 'ar'
+          ? 'هل أنت متأكد من رغبتك في تسجيل الخروج من هذا الجهاز؟ ستبقى جميع بياناتك محفوظة.'
+          : language === 'fr'
+            ? 'Êtes-vous sûr de vouloir vous déconnecter de cet appareil ? Vos données restent enregistrées.'
+            : 'Are you sure you want to sign out on this device? All your data stays saved.'
+      }
+      confirmLabel={language === 'ar' ? 'تسجيل الخروج' : language === 'fr' ? 'Déconnexion' : 'Sign out'}
+      onConfirm={handleLogout}
+      onCancel={() => setShowLogoutConfirm(false)}
+    />
+    </>
   );
 }

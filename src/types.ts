@@ -418,6 +418,9 @@ export interface Project {
   recordRevision?: string;
   /** Lightweight diagnostics for versioned record collections. */
   recordCounts?: Partial<Record<ProjectRecordKind, number>>;
+  /** Standalone quote this project was converted from (traceability, no rules impact). */
+  sourceQuoteId?: string;
+  sourceQuoteNumber?: string;
 }
 
 export type ProjectRecordKind =
@@ -460,6 +463,10 @@ export type ActivityActionType =
   | 'subtask_changed'
   | 'status_changed'
   | 'project_created'
+  | 'project_updated'
+  | 'section_updated'
+  | 'change_order_approved'
+  | 'change_order_rejected'
   | 'member_joined'
   | 'document_added'
   | 'photo_uploaded';
@@ -569,6 +576,56 @@ export interface DocumentParty {
 
 export type DocumentKind = 'invoice' | 'receipt' | 'voucher';
 export type DocumentLineColumn = 'quantity' | 'unitPrice' | 'total';
+
+/** Standalone sales quotes (devis) — live at user level until converted into a project. */
+export type QuoteStatus = 'draft' | 'sent' | 'approved' | 'rejected';
+
+export interface QuoteLineItem {
+  id: string;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+}
+
+/** Lightweight work-calendar entry (meeting, delivery, day off, reminder). User-private. */
+export type CalendarEventKind = 'meeting' | 'delivery' | 'day_off' | 'reminder' | 'other';
+
+export interface CalendarEventRecord {
+  id: string;
+  /** ISO date key YYYY-MM-DD. */
+  date: string;
+  title: string;
+  kind: CalendarEventKind;
+  notes?: string;
+  /** Optional link to a workspace. */
+  projectId?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+}
+
+export interface QuoteRecord {  id: string;
+  /** Human number, e.g. DEV-2026-0007 (unique per user + year). */
+  number: string;
+  clientName: string;
+  clientEmail?: string;
+  clientPhone?: string;
+  address?: string;
+  items: QuoteLineItem[];
+  subtotal: number;
+  taxRate: number;
+  total: number;
+  currency: string;
+  notes?: string;
+  /** ISO date until which the quoted prices hold. */
+  validUntil?: string;
+  status: QuoteStatus;
+  /** Project created from this quote (set on conversion). */
+  convertedProjectId?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+}
 
 export interface DocumentKindPreset {
   prefix: string;

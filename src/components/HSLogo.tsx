@@ -1,35 +1,32 @@
 import React from 'react';
-import iconSrc from '../../assets/img/HS INFINITY-icon.jpeg';
+import logoLight from '../../assets/img/HS INFINITY LOGO- for light mode.png';
+import logoDark from '../../assets/img/HS INFINITY LOGO - for dark mode.png';
 
 export interface HSLogoProps {
   className?: string;
-  /** Compact mark for navbar / sidebar (same asset, tighter fit) */
+  /** Kept for compatibility — no longer renders the boxed icon background. */
   compact?: boolean;
 }
 
 /**
- * HS Infinity brand mark — uses assets/img/HS INFINITY-icon.jpeg everywhere.
+ * HS Infinity brand mark — theme-aware full logos, no wrapper, no background box.
+ * Light mode uses the light logo, dark mode uses the dark logo.
  */
-export const HSLogo = ({ className = 'w-6 h-6', compact = false }: HSLogoProps) => {
-  if (compact) {
-    return (
-      <span className={`inline-flex shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white dark:bg-slate-900 ${className}`}>
-        <img
-          src={iconSrc}
-          alt="HS Infinity"
-          className="h-full w-full object-contain p-0.5"
-          draggable={false}
-        />
-      </span>
-    );
-  }
-
+export const HSLogo = ({ className = 'w-6 h-6' }: HSLogoProps) => {
   return (
-    <img
-      src={iconSrc}
-      alt="HS Infinity"
-      className={`object-contain ${className}`}
-      draggable={false}
-    />
+    <>
+      <img
+        src={logoLight}
+        alt="HS Infinity"
+        className={`object-contain dark:hidden ${className}`}
+        draggable={false}
+      />
+      <img
+        src={logoDark}
+        alt="HS Infinity"
+        className={`hidden object-contain dark:block ${className}`}
+        draggable={false}
+      />
+    </>
   );
 };

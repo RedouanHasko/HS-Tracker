@@ -189,6 +189,65 @@ test('versioned project records inherit access and preserve role boundaries', as
   await assertSucceeds(deleteBatch.commit());
 });
 
+test('invitees accept with a surgical membership patch (no role map, no records)', async () => {
+  const pendingRef = projectRef(context('pending', inviteeEmail));
+  const acceptedMembers = projectFixture().members.map((member) =>
+    member.email === inviteeEmail ? { ...member, status: 'accepted' } : member
+  );
+  // Exact shape the app writes: members + memberEmails + invitedEmails only.
+  await assertSucceeds(updateDoc(pendingRef, {
+    members: acceptedMembers,
+    memberEmails: [...projectFixture().memberEmails, inviteeEmail],
+    invitedEmails: [],
+  }));
+  // Membership granted: the project root stays readable (records inherit access).
+  await assertSucceeds(getDoc(pendingRef));
+});
+
+test('invitees decline by leaving the invite lists without joining members', async () => {
+  const pendingRef = projectRef(context('pending', inviteeEmail));
+  const declinedMembers = projectFixture().members.map((member) =>
+    member.email === inviteeEmail ? { ...member, status: 'declined' } : member
+  );
+  await assertSucceeds(updateDoc(pendingRef, {
+    members: declinedMembers,
+    invitedEmails: [],
+  }));
+  // No longer invited and never a member: the project doc is unreadable again.
+  await assertFails(getDoc(pendingRef));
+});
+
+test('outsiders cannot self-add through the invitee patch', async () => {
+  const outsiderRef = projectRef(context('outsider', 'outsider@example.com'));
+  await assertFails(updateDoc(outsiderRef, {
+    members: [
+      ...projectFixture().members,
+      { email: 'outsider@example.com', name: 'Outsider', role: 'contributor', status: 'accepted' },
+    ],
+    memberEmails: [...projectFixture().memberEmails, 'outsider@example.com'],
+    invitedEmails: [],
+  }));
+});
+
+test('invitees cannot touch anything outside the membership patch', async () => {
+  const pendingRef = projectRef(context('pending', inviteeEmail));
+  const acceptedMembers = projectFixture().members.map((member) =>
+    member.email === inviteeEmail ? { ...member, status: 'accepted' } : member
+  );
+  await assertFails(updateDoc(pendingRef, {
+    members: acceptedMembers,
+    memberEmails: [...projectFixture().memberEmails, inviteeEmail],
+    invitedEmails: [],
+    tasks: [{ id: 'task_smuggled', title: 'Smuggled task' }],
+  }));
+  await assertFails(updateDoc(pendingRef, {
+    members: acceptedMembers,
+    memberEmails: [...projectFixture().memberEmails, inviteeEmail],
+    invitedEmails: [],
+    budget: 999999,
+  }));
+});
+
 test('new operational records enforce contributor and manager boundaries', async () => {
   const contributorDb = context('contributor', contributorEmail).firestore();
   const managerDb = context('manager', managerEmail).firestore();

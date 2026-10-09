@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import TopNavbar from './TopNavbar';
 import TaskDetailPanel from './TaskDetailPanel';
 import TaskKanbanBoard from './TaskKanbanBoard';
+import ProjectSectionsManager from './ProjectSectionsManager';
 import DocumentPartySelector from './DocumentPartySelector';
 import ConfirmDialog, { ConfirmRequest } from './ConfirmDialog';
 import ExpenseReceiptField, { ExpenseReceiptDraft } from './ExpenseReceiptField';
@@ -118,8 +119,7 @@ type DocumentLineItem = {
   commissionPercent?: number;
 };
 import { TRANSLATIONS, calculateSettlements } from '../utils/mockData';
-
-const EXPORT_COLUMNS = [
+import { acceptedMembers, getAdjustedBudget, sanitizeCsvCell } from '../utils/projectFinance';const EXPORT_COLUMNS = [
   { key: 'date', labelEn: 'Date', labelFr: 'Date', labelAr: 'التاريخ' },
   { key: 'title', labelEn: 'Title', labelFr: 'Titre', labelAr: 'العنوان' },
   { key: 'description', labelEn: 'Description', labelFr: 'Description', labelAr: 'الوصف' },
@@ -146,8 +146,10 @@ import {
   updatePresetForKind,
   DEFAULT_DOC_PRESETS,
 } from '../utils/documentProfiles';
-import { resolveUserRole, getProjectPermissions, canEditTask, canDeleteTask, canEditExpense, canDeleteExpense, isProjectOwner, needsProjectAccessFieldSync } from '../utils/permissions';
+import { resolveUserRole, getProjectPermissions, canEditTask, canDeleteTask, canEditExpense, canDeleteExpense, isProjectOwner, needsProjectAccessFieldSync, taskEditDenialReason } from '../utils/permissions';
 import { describeSubtaskChanges, buildActivityMemberEmails } from '../utils/activityHelpers';
+import { completionBlocker, syncTaskOwner, taskOwnerEmail, taskStatusLabel } from '../utils/taskState';
+import { clampCommission, formErrorText, isValidEmail, validateExpense, validateReimbursement, type FormErrorCode } from '../utils/forms';
 import { AIDocumentDraft } from '../utils/aiDocumentDraft';
 import { pulseElementById, PendingAiNav } from '../utils/aiNavigation';
 import { saveCivilDocumentAsPdf } from '../utils/printCivilDocument';
@@ -166,6 +168,7 @@ import {
   findUserProfile,
   sendProjectInvitation,
   revokeProjectInvitation,
+  revokeProjectInvitationBestEffort,
   syncProjectAccessFieldsIfNeeded,
   loadProjectTrash,
   restoreProjectRecordFromTrash,
@@ -208,6 +211,7 @@ interface ProjectDetailProps {
   onOpenCreateProject?: () => void;
   unreadCount?: number;
   onToggleNotifications?: () => void;
+  onOpenSearch?: () => void;
   pendingNav?: PendingNotificationNav | null;
   onPendingNavConsumed?: () => void;
   pendingAiNav?: PendingAiNav | null;
@@ -215,6 +219,15 @@ interface ProjectDetailProps {
   pendingDocumentDraft?: AIDocumentDraft | null;
   onPendingDocumentDraftConsumed?: () => void;
 }
+
+/** Status pill tones shared by the project header and work-status strip. */
+const PROJECT_STATUS_PILL: Record<string, string> = {
+  planning: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+  in_progress: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300',
+  paused: 'bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-300',
+  completed: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300',
+  cancelled: 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400',
+};
 
 export default function ProjectDetail({ 
   projectId, 
@@ -231,6 +244,7 @@ export default function ProjectDetail({
   onOpenCreateProject,
   unreadCount = 0,
   onToggleNotifications,
+  onOpenSearch,
   pendingNav,
   onPendingNavConsumed,
   pendingAiNav,
@@ -328,8 +342,10 @@ export default function ProjectDetail({
   const [expenseDate, setExpenseDate] = useState('');
   const [expenseRentalChargeTo, setExpenseRentalChargeTo] = useState<NonNullable<Expense['rentalChargeTo']>>('owner');
   const [expenseRentalBookingId, setExpenseRentalBookingId] = useState('');
-  const [expenseReceiptDraft, setExpenseReceiptDraft] = useState<ExpenseReceiptDraft | null>(null);
-  const [removeExpenseReceipt, setRemoveExpenseReceipt] = useState(false);
+  const [expenseReceiptDrafts, setExpenseReceiptDrafts] = useState<ExpenseReceiptDraft[]>([]);
+  /** Ids of already-saved receipts the user chose to remove (applied on save). */
+  const [receiptsToRemove, setReceiptsToRemove] = useState<string[]>([]);
+  const [expenseFormError, setExpenseFormError] = useState<FormErrorCode | null>(null);
   const [expenseSaving, setExpenseSaving] = useState(false);
   const [showExportPicker, setShowExportPicker] = useState(false);
   const [selectedExportCols, setSelectedExportCols] = useState<Set<string>>(new Set(['date', 'title', 'category', 'amount', 'paidBy']));
@@ -341,6 +357,7 @@ export default function ProjectDetail({
   const [reimbAmount, setReimbAmount] = useState(0);
   const [reimbDate, setReimbDate] = useState('');
   const [reimbSaving, setReimbSaving] = useState(false);
+  const [reimbFormError, setReimbFormError] = useState<FormErrorCode | null>(null);
 
   const closeReimbursementModal = useCallback(() => {
     setShowReimbursementModal(false);
@@ -349,12 +366,15 @@ export default function ProjectDetail({
     setReimbTo('');
     setReimbAmount(0);
     setReimbDate('');
+    setReimbFormError(null);
   }, []);
 
   const resetExpenseForm = useCallback(() => {
-    setExpenseReceiptDraft((draft) => {
-      if (draft?.previewUrl) URL.revokeObjectURL(draft.previewUrl);
-      return null;
+    setExpenseReceiptDrafts((drafts) => {
+      for (const draft of drafts) {
+        if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl);
+      }
+      return [];
     });
     setExpenseTitle('');
     setExpenseDesc('');
@@ -366,7 +386,8 @@ export default function ProjectDetail({
     setExpenseRentalChargeTo('owner');
     setExpenseRentalBookingId('');
     setEditingExpenseId(null);
-    setRemoveExpenseReceipt(false);
+    setReceiptsToRemove([]);
+    setExpenseFormError(null);
   }, []);
 
   const closeExpenseModal = useCallback(() => {
@@ -414,6 +435,7 @@ export default function ProjectDetail({
 
   // Add Task form states
   const [taskTitle, setTaskTitle] = useState('');
+  const [taskFormError, setTaskFormError] = useState<FormErrorCode | null>(null);
   const [taskDesc, setTaskDesc] = useState('');
   const [taskAssignedTo, setTaskAssignedTo] = useState('');
   const [taskPriority, setTaskPriority] = useState<'low' | 'medium' | 'high'>('medium');
@@ -425,6 +447,8 @@ export default function ProjectDetail({
   const [newMemberRole, setNewMemberRole] = useState<UserRole>('contributor');
   const [memberSearchLoading, setMemberSearchLoading] = useState(false);
   const [memberSearchError, setMemberSearchError] = useState<string | null>(null);
+  /** Email of the member row with an in-flight resend/remove (buttons stay disabled). */
+  const [memberActionBusy, setMemberActionBusy] = useState<string | null>(null);
 
   // Edit Project settings states
   const [editName, setEditName] = useState('');
@@ -458,6 +482,7 @@ export default function ProjectDetail({
   const [docDueDate, setDocDueDate] = useState(appDateKeyAfterDays(15));
   const [docLogo, setDocLogo] = useState<string | null>(null);
   const [docPaperFormat, setDocPaperFormat] = useState<'A4'>('A4');
+  const docLogoStorageKey = `hs_doc_logo_${user?.uid || 'anon'}`;
 
   const [docSenderName, setDocSenderName] = useState('');
   const [docSenderEmail, setDocSenderEmail] = useState('');
@@ -481,6 +506,10 @@ export default function ProjectDetail({
   const [docSaving, setDocSaving] = useState(false);
   const [docSaveMessage, setDocSaveMessage] = useState('');
   const [docSettingsLoaded, setDocSettingsLoaded] = useState(false);
+  // Facturation pipeline filters (UI only — saved list filtering)
+  const [docListQuery, setDocListQuery] = useState('');
+  const [docListKind, setDocListKind] = useState<'all' | DocumentKind>('all');
+  const [docListStatus, setDocListStatus] = useState<'all' | CivilDocumentRecord['status']>('all');
 
   // Item builder fields
   const [newItemDesc, setNewItemDesc] = useState('');
@@ -513,9 +542,8 @@ export default function ProjectDetail({
 
   useClickOutside(exportPickerRef, () => setShowExportPicker(false), showExportPicker);
 
-  const handleExportExpensesExcel = () => {
-    const colsOrder = ['date', 'title', 'description', 'supplier', 'category', 'amount', 'commission', 'invoicePrice', 'paidBy', 'currency', 'notes', 'section'];
-    const activeCols = colsOrder.filter(c => selectedExportCols.has(c));
+  const handleExportExpensesCsv = () => {
+    const colsOrder = ['date', 'title', 'description', 'supplier', 'category', 'amount', 'commission', 'invoicePrice', 'paidBy', 'currency', 'notes', 'section'];    const activeCols = colsOrder.filter(c => selectedExportCols.has(c));
     const colLabels = activeCols.map(k => {
       const col = EXPORT_COLUMNS.find(c => c.key === k)!;
       return language === 'en' ? col.labelEn : language === 'fr' ? col.labelFr : col.labelAr;
@@ -548,7 +576,7 @@ export default function ProjectDetail({
     }
 
     const escapeCsvCell = (value: string | number) =>
-      `"${String(value).replace(/"/g, '""')}"`;
+      `"${sanitizeCsvCell(value).replace(/"/g, '""')}"`;
     const csv = rows.map((row) => row.map(escapeCsvCell).join(',')).join('\r\n');
     const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' });
     const downloadUrl = URL.createObjectURL(blob);
@@ -802,6 +830,14 @@ export default function ProjectDetail({
     if (!projectId) return;
     return subscribeToCivilDocuments(projectId, setSavedCivilDocuments);
   }, [projectId]);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    try {
+      const savedLogo = localStorage.getItem(`hs_doc_logo_${user.uid}`);
+      if (savedLogo) setDocLogo(savedLogo);
+    } catch { /* storage unavailable */ }
+  }, [user?.uid]);
 
   const loadCivilDocumentIntoEditor = (saved: CivilDocumentRecord) => {
     setActiveCivilDocumentId(saved.id);
@@ -1125,15 +1161,28 @@ export default function ProjectDetail({
 
   if (!project) {
     return (
-      <AppLoader
-        label={
-          language === 'en'
-            ? 'Loading project workspace…'
-            : language === 'fr'
-              ? 'Chargement de l\'espace projet…'
-              : 'جاري تحميل مساحة المشروع…'
-        }
-      />
+      <div className="flex min-h-[70vh] flex-col items-center justify-center gap-4 p-6 text-center">
+        <div className="space-y-2">
+          <h2 className="text-lg font-bold text-slate-900 dark:text-white">
+            {language === 'en' ? 'Project not found' : language === 'fr' ? 'Projet introuvable' : 'المشروع غير موجود'}
+          </h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm">
+            {language === 'en'
+              ? 'This project may not exist or you no longer have access to it.'
+              : language === 'fr'
+                ? 'Ce projet n\'existe pas ou vous n\'y avez plus accès.'
+                : 'هذا المشروع غير موجود أو لم يعد لديك حق الوصول إليه.'}
+          </p>
+        </div>
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-950 shadow-sm"
+          >
+            {language === 'en' ? 'Back to dashboard' : language === 'fr' ? 'Retour au tableau de bord' : 'العودة للوحة التحكم'}
+          </button>
+        )}
+      </div>
     );
   }
 
@@ -1159,14 +1208,17 @@ export default function ProjectDetail({
       });
     });
 
-  // Cost and dues calculations (respecting reimbursements inside calculateSettlements)
+  // Cost and dues calculations (respecting reimbursements inside calculateSettlements).
+  // totalSpent is commission-inclusive; adjustedBudget includes approved change orders.
   const { totalSpent, paidMap, expectedShares, settlements } = calculateSettlements(project);
+  const adjustedBudget = getAdjustedBudget(project);
+  const budgetDelta = adjustedBudget - (Number(project.budget) || 0);
 
   const hasBudget = project.projectType === 'construction' && project.budget > 0;
   // Construction and rental workspaces track project finances, not personal debt settlements.
   // Legacy service data remains preserved, but it is the only historical context that can expose this UI.
   const isSettlementWorkspace = project.projectType === 'service';
-  const percentSpent = hasBudget ? Math.round((totalSpent / project.budget) * 100) : 0;
+  const percentSpent = hasBudget ? Math.round((totalSpent / (adjustedBudget || 1)) * 100) : 0;
   const rentalBookings = project.rentalBookings || [];
   const billableRentalBookings = rentalBookings.filter((booking) => booking.status !== 'cancelled');
   const rentalRevenue = billableRentalBookings.reduce((s, b) => s + b.totalAmount, 0);
@@ -1182,6 +1234,38 @@ export default function ProjectDetail({
   const userEmail = (user?.email || '').toLowerCase();
   const userRole = resolveUserRole(project, userEmail);
   const perm = getProjectPermissions(userRole);
+
+  const isOwner = project.members.some(m => m.email === userEmail && m.role === 'owner');
+  const isManager = project.members.some(m => m.email === userEmail && m.role === 'manager');
+  const isMemberOrCreator = project.members.some(m => m.email === userEmail) || project.creatorEmail === userEmail;
+  const isAcceptedMember = project.members.some(m => m.email === userEmail && m.status !== 'invited');
+
+  if (!isMemberOrCreator) {
+    return (
+      <div className="flex min-h-[70vh] flex-col items-center justify-center gap-4 p-6 text-center">
+        <div className="space-y-2">
+          <h2 className="text-lg font-bold text-slate-900 dark:text-white">
+            {language === 'en' ? 'Access denied' : language === 'fr' ? 'Accès refusé' : 'تم رفض الوصول'}
+          </h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm">
+            {language === 'en'
+              ? 'You do not have permission to view this project.'
+              : language === 'fr'
+                ? 'Vous n\'avez pas la permission de voir ce projet.'
+                : 'ليس لديك صلاحية لعرض هذا المشروع.'}
+          </p>
+        </div>
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-950 shadow-sm"
+          >
+            {language === 'en' ? 'Back' : language === 'fr' ? 'Retour' : 'رجوع'}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   const denyWrite = (action: string) => {
     const msg =
@@ -1333,7 +1417,9 @@ export default function ProjectDetail({
         });
         return next;
       });
-      setGalleryPage(1);
+      // New photos append at the end — land on the last page instead of resetting to page 1.
+      const totalAfterUpload = (project.photos || []).length + uploaded.length;
+      setGalleryPage(Math.max(1, Math.ceil(totalAfterUpload / GALLERY_ITEMS_PER_PAGE)));
       setGalleryUploadStatus(
         language === 'fr'
           ? `${uploaded.length} photo(s) enregistrée(s)`
@@ -1442,48 +1528,67 @@ export default function ProjectDetail({
       return;
     }
 
-    if (!expenseTitle.trim() || expenseAmount <= 0 || expenseSaving) return;
+    const commission = clampCommission(expenseCommission);
+    const validationError = validateExpense({
+      title: expenseTitle,
+      amount: expenseAmount,
+      commission: expenseCommission,
+    });
+    if (validationError || expenseSaving) {
+      setExpenseFormError(validationError);
+      return;
+    }
+    // Persist the clamped commission so an out-of-range input can never be stored.
+    if (commission !== expenseCommission) setExpenseCommission(commission);
+    setExpenseFormError(null);
 
     setExpenseSaving(true);
     const expenseId = isEdit ? editingExpenseId! : `exp_${Date.now()}`;
+    // New receipts APPEND to the saved ones — editing never destroys existing files.
     let receiptFiles: TaskMedia[] = existing?.receiptFiles ? [...existing.receiptFiles] : [];
+    const removedIds = new Set(receiptsToRemove);
+    // Storage paths uploaded during THIS save — deleted again if the save fails,
+    // so a failed save never leaves orphaned files behind.
+    const uploadedThisSave: string[] = [];
 
     try {
-      if (expenseReceiptDraft) {
+      if (expenseReceiptDrafts.length > 0) {
         if (user?.uid) {
           await syncProjectAccessFieldsIfNeeded(user.uid, project);
         }
-        const { file } = expenseReceiptDraft;
-        const { url, storagePath, sizeBytes } = await uploadExpenseReceipt(
-          project.id,
-          expenseId,
-          file,
-          file.name,
-          file.type || 'image/jpeg'
-        );
-        receiptFiles = [
-          {
-            id: `rcpt_${Date.now()}`,
+        for (const draft of expenseReceiptDrafts) {
+          const { url, storagePath, sizeBytes } = await uploadExpenseReceipt(
+            project.id,
+            expenseId,
+            draft.file,
+            draft.file.name,
+            draft.file.type || 'image/jpeg'
+          );
+          receiptFiles.push({
+            id: `rcpt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             url,
             storagePath,
             uploadDate: new Date().toISOString(),
             sizeBytes,
-            originalName: file.name,
+            originalName: draft.file.name,
             ...(expenseSupplier.trim() ? { caption: expenseSupplier.trim() } : {}),
-          },
-        ];
-        for (const media of existing?.receiptFiles || []) {
-          if (media.storagePath) {
-            await deleteStorageFile(media.storagePath);
+          });
+          if (storagePath) uploadedThisSave.push(storagePath);
+        }
+      }
+      if (removedIds.size > 0 && receiptFiles.length > 0) {
+        // Delete only the files the user explicitly removed — never the whole set.
+        const kept: TaskMedia[] = [];
+        for (const media of receiptFiles) {
+          if (removedIds.has(media.id)) {
+            if (media.storagePath) {
+              await deleteStorageFile(media.storagePath);
+            }
+          } else {
+            kept.push(media);
           }
         }
-      } else if (removeExpenseReceipt && existing?.receiptFiles?.length) {
-        for (const media of existing.receiptFiles) {
-          if (media.storagePath) {
-            await deleteStorageFile(media.storagePath);
-          }
-        }
-        receiptFiles = [];
+        receiptFiles = kept;
       }
 
       const expensePayload: Expense = {
@@ -1491,7 +1596,7 @@ export default function ProjectDetail({
         title: expenseTitle.trim(),
         description: expenseDesc.trim() || 'No details provided.',
         amount: Number(expenseAmount),
-        commissionPercent: expenseCommission > 0 ? expenseCommission : undefined,
+        commissionPercent: commission > 0 ? commission : undefined,
         currency: project.currency,
         category: expenseCat,
         date: expenseDate || appDateKey(),
@@ -1519,7 +1624,10 @@ export default function ProjectDetail({
       const isOverBudget = newTotalSpent > project.budget;
 
       const ok = await syncProjectChanges({ ...project, expenses: updatedExpenses });
-      if (!ok) return;
+      if (!ok) {
+        await Promise.all(uploadedThisSave.map((path) => deleteStorageFile(path).catch(() => {})));
+        return;
+      }
 
       await trackActivity(
         isEdit ? 'expense_updated' : 'expense_added',
@@ -1550,6 +1658,7 @@ export default function ProjectDetail({
       closeExpenseModal();
     } catch (err) {
       console.error('Save expense failed:', err);
+      await Promise.all(uploadedThisSave.map((path) => deleteStorageFile(path).catch(() => {})));
       const detail = formatMediaUploadError(err);
       showAlert(
         language === 'en' ? 'Save failed' : language === 'fr' ? 'Échec de l’enregistrement' : 'فشل الحفظ',
@@ -1584,11 +1693,28 @@ export default function ProjectDetail({
   // Add Reimbursement / Settle Debt
   const handleRecordReimbursement = async (from: string, to: string, amount: number) => {
     if (!perm.canManageReimbursements) {
-      denyWrite('record settlements');
+      showAlert(
+        language === 'en' ? 'Permission denied' : language === 'fr' ? 'Permission refusée' : 'صلاحية مرفوضة',
+        language === 'en'
+          ? 'Only owners or managers can record settlements. Your role is read-only.'
+          : language === 'fr'
+            ? 'Seuls les propriétaires ou gestionnaires peuvent enregistrer des règlements.'
+            : 'يمكن للمالكين أو المديرين فقط تسجيل التسويات.',
+        'info'
+      );
       return;
     }
     const fromMember = project.members.find(m => m.email === from);
     const toMember = project.members.find(m => m.email === to);
+    const partiesError = validateReimbursement({ from, to, amount });
+    if (partiesError) {
+      showAlert(
+        language === 'en' ? 'Invalid settlement' : language === 'fr' ? 'Règlement invalide' : 'تسوية غير صالحة',
+        formErrorText(partiesError, language),
+        'info'
+      );
+      return;
+    }
 
     const newReimb: Reimbursement = {
       id: `reimb_${Date.now()}`,
@@ -1614,7 +1740,15 @@ export default function ProjectDetail({
   // Undo / Delete Reimbursement
   const handleDeleteReimbursement = async (id: string) => {
     if (!perm.canManageReimbursements) {
-      denyWrite('delete settlements');
+      showAlert(
+        language === 'en' ? 'Permission denied' : language === 'fr' ? 'Permission refusée' : 'صلاحية مرفوضة',
+        language === 'en'
+          ? 'Only owners or managers can update settlements. Your role is read-only.'
+          : language === 'fr'
+            ? 'Seuls les propriétaires ou gestionnaires peuvent modifier des règlements.'
+            : 'يمكن للمالكين أو المديرين فقط تعديل التسويات.',
+        'info'
+      );
       return;
     }
     const target = (project.reimbursements || []).find(r => r.id === id);
@@ -1637,7 +1771,12 @@ export default function ProjectDetail({
   const handleReimbursementSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!perm.canManageReimbursements || !editingReimbursementId || reimbSaving) return;
-    if (!reimbFrom || !reimbTo || reimbAmount <= 0) return;
+    const partiesError = validateReimbursement({ from: reimbFrom, to: reimbTo, amount: reimbAmount });
+    if (partiesError) {
+      setReimbFormError(partiesError);
+      return;
+    }
+    setReimbFormError(null);
 
     setReimbSaving(true);
     try {
@@ -1713,34 +1852,41 @@ export default function ProjectDetail({
         targetName = foundProfile.fullName || targetName;
       }
 
-      // 2. Prevent duplicate entries
-      const emailInUse = project.members.some(m => m.email.toLowerCase() === targetEmail);
-      if (emailInUse) {
-        setMemberSearchError("This collaborator is already registered inside this project workspace.");
+      // 1b. Reject anything that is not an email address (usernames resolve via profiles above)
+      if (!isValidEmail(targetEmail)) {
+        setMemberSearchError(formErrorText('invalid_email', language));
         setMemberSearchLoading(false);
         return;
       }
 
-      // 3. Create a member with Pending status
+      // 2. Prevent duplicate entries — but allow repairing pending/declined invites
+      const existing = project.members.find(m => m.email.toLowerCase() === targetEmail);
+      if (existing && (existing.status === 'accepted' || !existing.status)) {
+        setMemberSearchError(
+          language === 'en'
+            ? "This collaborator is already a member of this project workspace."
+            : language === 'fr'
+              ? "Ce collaborateur est déjà membre de cet espace projet."
+              : "هذا المتعاون عضو بالفعل في مساحة المشروع."
+        );
+        setMemberSearchLoading(false);
+        return;
+      }
+      if (existing?.status === 'pending') {
+        setMemberSearchError(
+          language === 'en'
+            ? "An invitation is already pending for this collaborator. Use Resend on their row to send a fresh invitation."
+            : language === 'fr'
+              ? "Une invitation est déjà en attente. Utilisez Renvoyer sur sa ligne pour un nouvel envoi."
+              : "الدعوة معلقة بالفعل لهذا المتعاون. استخدم زر إعادة الإرسال في صفّه لإرسال دعوة جديدة."
+        );
+        setMemberSearchLoading(false);
+        return;
+      }
+      // A declined member may be re-invited: fall through and flip them back to pending.
+
+      // 3. Create the invitation FIRST so a send failure never leaves a stuck member row
       const inviteId = `invite_${Date.now()}`;
-      const pendingMember: ProjectMember = {
-        email: targetEmail,
-        name: targetName,
-        role: newMemberRole,
-        status: 'pending',
-        invitationId: inviteId,
-        avatar: foundProfile?.avatarUrl || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(targetName)}&backgroundColor=0284c7`
-      };
-
-      const updatedProj = {
-        ...project,
-        members: [...project.members, pendingMember]
-      };
-
-      // 4. Save project synchronously
-      await syncProjectChanges(updatedProj);
-
-      // 5. Send invitation
       const invitation: Invitation = {
         id: inviteId,
         projectId: project.id,
@@ -1748,14 +1894,62 @@ export default function ProjectDetail({
         ownerEmail: (user?.email || '').toLowerCase(),
         ownerName: user?.displayName || 'Project Architect',
         inviteeEmail: targetEmail,
-        role: newMemberRole,
+        role: existing?.status === 'declined' ? existing.role : newMemberRole,
         status: 'pending',
         timestamp: new Date().toISOString()
       };
-      await sendProjectInvitation(invitation);
+      try {
+        await sendProjectInvitation(invitation);
+      } catch (inviteErr) {
+        console.error('Failed to send invitation:', inviteErr);
+        setMemberSearchError(
+          language === 'en'
+            ? "Could not send the invitation. Check your connection and try again — no member was added."
+            : language === 'fr'
+              ? "Envoi de l'invitation impossible. Vérifiez votre connexion et réessayez."
+              : "تعذر إرسال الدعوة. تحقق من الاتصال وحاول مرة أخرى."
+        );
+        setMemberSearchLoading(false);
+        return;
+      }
+
+      // 4. Add (or restore) the pending member row only after the invitation exists
+      const pendingMember: ProjectMember = {
+        email: targetEmail,
+        name: existing?.status === 'declined' ? existing.name : targetName,
+        role: invitation.role,
+        status: 'pending',
+        invitationId: inviteId,
+        avatar: foundProfile?.avatarUrl || existing?.avatar || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(targetName)}&backgroundColor=0284c7`
+      };
+      const updatedProj = {
+        ...project,
+        members: existing
+          ? project.members.map(m => m.email.toLowerCase() === targetEmail ? pendingMember : m)
+          : [...project.members, pendingMember]
+      };
+
+      const ok = await syncProjectChanges(updatedProj);
+      if (!ok) {
+        // Roll back the invitation so the member can retry cleanly (no dangling invite).
+        try {
+          await revokeProjectInvitation(inviteId);
+        } catch (revokeErr) {
+          console.warn('Invitation rollback skipped:', revokeErr);
+        }
+        setMemberSearchError(
+          language === 'en'
+            ? "Could not save the invitation. The invitation was rolled back — please try again."
+            : language === 'fr'
+              ? "Enregistrement impossible. L'invitation a été annulée — réessayez."
+              : "تعذر حفظ الدعوة. تم التراجع عنها — حاول مرة أخرى."
+        );
+        setMemberSearchLoading(false);
+        return;
+      }
 
       // Invitee bell notification is synced via subscribeToInvitations → syncInvitationNotifications
-      await trackActivity('member_joined', `Sent collaboration invitation to ${targetName} (${targetEmail}) as ${newMemberRole}.`);
+      await trackActivity('member_joined', `Sent collaboration invitation to ${pendingMember.name} (${targetEmail}) as ${invitation.role}.`);
 
       // Reset
       setNewMemberEmail('');
@@ -1770,7 +1964,73 @@ export default function ProjectDetail({
     }
   };
 
-  // Delete Project Partner (or cancel a pending invitation)
+  // Re-send a pending (or declined-then-revived) invitation with a fresh invitation doc.
+  // Repairs rows whose invitation doc is missing or was consumed by a failed join.
+  const handleResendInvitation = async (email: string) => {
+    if (!perm.canManageMembers) {
+      denyWrite('invite members');
+      return;
+    }
+    const member = project.members.find((m) => m.email.toLowerCase() === email.toLowerCase());
+    if (!member || (member.status !== 'pending' && member.status !== 'declined')) return;
+    setMemberActionBusy(email);
+    try {
+      const inviteId = `invite_${Date.now()}`;
+      const invitation: Invitation = {
+        id: inviteId,
+        projectId: project.id,
+        projectName: project.name,
+        ownerEmail: (user?.email || '').toLowerCase(),
+        ownerName: user?.displayName || 'Project Architect',
+        inviteeEmail: member.email.toLowerCase(),
+        role: member.role,
+        status: 'pending',
+        timestamp: new Date().toISOString()
+      };
+      await sendProjectInvitation(invitation);
+      const ok = await syncProjectChanges({
+        ...project,
+        members: project.members.map((m) =>
+          m.email.toLowerCase() === email.toLowerCase()
+            ? { ...m, status: 'pending' as const, invitationId: inviteId }
+            : m
+        ),
+      });
+      if (!ok) {
+        try {
+          await revokeProjectInvitation(inviteId);
+        } catch (revokeErr) {
+          console.warn('Invitation rollback skipped:', revokeErr);
+        }
+        return;
+      }
+      // Retire the superseded invitation doc so only the fresh invite stays actionable.
+      if (member.invitationId && member.invitationId !== inviteId) {
+        try {
+          await revokeProjectInvitation(member.invitationId);
+        } catch (revokeErr) {
+          console.warn('Superseded invitation cleanup skipped:', revokeErr);
+        }
+      }
+      await trackActivity('member_joined', `Re-sent collaboration invitation to ${member.name} (${member.email}).`);
+    } catch (err) {
+      console.error('Failed to re-send invitation:', err);
+      showAlert(
+        language === 'en' ? 'Invitation failed' : language === 'fr' ? "Échec de l'invitation" : 'فشلت الدعوة',
+        language === 'en'
+          ? 'Could not send the invitation. Check your connection and try again.'
+          : language === 'fr'
+            ? "Envoi de l'invitation impossible. Vérifiez votre connexion et réessayez."
+            : 'تعذر إرسال الدعوة. تحقق من الاتصال وحاول مرة أخرى.',
+        'danger'
+      );
+    } finally {
+      setMemberActionBusy(null);
+    }
+  };
+
+  // Delete Project Partner (or cancel a pending invitation).
+  // Revoke is best-effort: a missing/consumed invitation doc must never trap the member row.
   const handleRemoveMember = async (email: string, invitationId?: string) => {
     if (!perm.canManageMembers) {
       denyWrite('remove members');
@@ -1792,28 +2052,29 @@ export default function ProjectDetail({
     const member = project.members.find((m) => m.email.toLowerCase() === email.toLowerCase());
     const invId = invitationId || member?.invitationId;
 
+    setMemberActionBusy(email);
     try {
-      if (invId) {
-        await revokeProjectInvitation(invId);
+      // A stale invite (already consumed or never created) is not a reason to keep the row:
+      // the accept flow refuses revoked invites, so removing the row is always safe.
+      const revoked = await revokeProjectInvitationBestEffort(invId || '');
+      if (!revoked) {
+        showAlert(
+          language === 'en' ? 'Invitation' : language === 'fr' ? 'Invitation' : 'الدعوة',
+          language === 'en'
+            ? 'Could not reach the invitation service, but the member will still be removed. Re-send a fresh invitation if they should rejoin.'
+            : language === 'fr'
+              ? "Service d'invitation injoignable, mais le membre sera quand même retiré."
+              : 'تعذر الوصول إلى خدمة الدعوات، لكن سيتم إزالة العضو على أي حال.',
+          'info'
+        );
       }
     } catch (e) {
       console.error('Failed to revoke invitation:', e);
-      const msg =
-        language === 'en'
-          ? 'Could not cancel the invitation. Please try again.'
-          : language === 'fr'
-            ? 'Impossible d’annuler l’invitation. Réessayez.'
-            : 'تعذر إلغاء الدعوة. حاول مرة أخرى.';
-      showAlert(
-        language === 'en' ? 'Task protected' : language === 'fr' ? 'Tâche protégée' : 'مهمة محمية',
-        msg,
-        'info'
-      );
-      return;
     }
 
     const filtered = project.members.filter((m) => m.email.toLowerCase() !== email.toLowerCase());
     const ok = await syncProjectChanges({ ...project, members: filtered });
+    setMemberActionBusy(null);
     if (!ok) return;
 
     const wasPending = member?.status === 'pending';
@@ -1959,7 +2220,11 @@ export default function ProjectDetail({
       denyWrite('create tasks');
       return;
     }
-    if (!taskTitle.trim()) return;
+    if (!taskTitle.trim()) {
+      setTaskFormError('required_title');
+      return;
+    }
+    setTaskFormError(null);
 
     const defaultMember =
       project.members.find((m) => m.status === 'accepted' || !m.status)?.email ||
@@ -2005,12 +2270,23 @@ export default function ProjectDetail({
     setTaskDesc('');
     setTaskDeadline('');
     setTaskPriority('medium');
+    setTaskFormError(null);
     setShowAddTask(false);
   };
 
   const updateTaskStatus = async (taskId: string, status: Task['status']) => {
     const task = project.tasks.find((t) => t.id === taskId);
     if (!task || !checkTaskEdit(task, 'edit')) return;
+    // Refuse completions that would violate dependencies or leave subtasks open.
+    const blocker = status === 'completed' ? completionBlocker(task, project.tasks, language) : null;
+    if (blocker) {
+      showAlert(
+        language === 'en' ? 'Cannot complete task' : language === 'fr' ? 'Impossible de terminer la tâche' : 'لا يمكن إنهاء المهمة',
+        blocker,
+        'info'
+      );
+      return;
+    }
     const updatedTasks = project.tasks.map(t => {
       if (t.id === taskId) {
         return { ...t, status };
@@ -2019,7 +2295,7 @@ export default function ProjectDetail({
     });
     const ok = await syncProjectChanges({ ...project, tasks: updatedTasks });
     if (ok) {
-      await trackActivity('task_updated', `Moved "${task.title}" to ${status}.`, {
+      await trackActivity('task_updated', `Moved "${task.title}" to ${taskStatusLabel(status, language)}.`, {
         targetType: 'task',
         targetId: task.id,
         targetTitle: task.title,
@@ -2054,7 +2330,10 @@ export default function ProjectDetail({
       denyWrite('edit tasks');
       return;
     }
-    const updatedTasks = project.tasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
+    // Keep `workedBy` and `assignedTo` aligned so cards, reminders and the panel agree.
+    const updatedTasks = project.tasks.map((t) =>
+      t.id === updatedTask.id ? syncTaskOwner(updatedTask) : t
+    );
     const ok = await syncProjectChanges({ ...project, tasks: updatedTasks });
     if (!ok) return;
 
@@ -2092,7 +2371,13 @@ export default function ProjectDetail({
     if (!editName.trim()) return;
 
     const newProjectType = editProjectType;
-    const newBudget = newProjectType === 'construction' ? (Number(editBudget) || 10000) : 0;
+    // An explicit 0 means "no budget yet" (clients often fund with time) and must be
+    // kept as-is. Only non-numeric/negative input falls back to the current budget —
+    // never invent money with a magic default.
+    const parsedBudget = Number(editBudget);
+    const newBudget = newProjectType === 'construction'
+      ? (Number.isFinite(parsedBudget) && parsedBudget >= 0 ? parsedBudget : project.budget)
+      : 0;
 
     const updated = {
       ...project,
@@ -2118,6 +2403,8 @@ export default function ProjectDetail({
             rentalBookings: project.rentalBookings || [],
           }
         : {
+            // Construction workspaces carry no rentalProperty: null is translated
+            // to a field deletion in saveProjectToDB (rules reject a null map).
             rentalProperty: null as any,
             rentalBookings: [],
           }),
@@ -2176,6 +2463,7 @@ export default function ProjectDetail({
         settingsLabel={language === 'en' ? 'Setup' : language === 'fr' ? 'Réglages' : 'إعدادات'}
         unreadCount={unreadCount}
         onToggleNotifications={onToggleNotifications}
+        onOpenSearch={onOpenSearch}
         langLabel={t.langLabel}
       />
 
@@ -2194,138 +2482,208 @@ export default function ProjectDetail({
       
       {/* Project Meta Head banner */}
       <div className="py-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-        <div>
+        <div className="min-w-0">
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${PROJECT_STATUS_PILL[project.status] || PROJECT_STATUS_PILL.planning}`}>
+              {t.status[project.status]}
+            </span>
+            <span className="rounded-full bg-sky-100 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-sky-800 dark:bg-sky-900/30 dark:text-sky-300">
+              {project.projectType === 'construction'
+                ? (language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء')
+                : project.projectType === 'rental'
+                  ? (language === 'en' ? 'Rental' : language === 'fr' ? 'Location' : 'إيجار')
+                  : (language === 'en' ? 'Service' : language === 'fr' ? 'Service' : 'خدمة')}
+            </span>
+            {project.sourceQuoteNumber && (
+              <span className="rounded-full border border-slate-200 px-2.5 py-0.5 font-mono text-[10px] font-semibold text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                {project.sourceQuoteNumber}
+              </span>
+            )}
+          </div>
           <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-white leading-tight">
             {project.name}
           </h2>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-2 text-xs text-slate-500 dark:text-slate-400 font-medium">
-            <span className="flex items-center gap-1"><UserIcon className="w-3.5 h-3.5 text-sky-505" /> {language === "en" ? "Client" : "Client"}: {project.clientName}</span>
-            <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5 text-sky-505" /> {project.address}</span>
-            <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5 text-sky-505" /> {project.startDate}</span>
+            <span className="flex items-center gap-1"><UserIcon className="w-3.5 h-3.5 text-sky-500" /> {language === "en" ? "Client" : "Client"}: {project.clientName}</span>
+            <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5 text-sky-500" /> {project.address}</span>
+            <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5 text-sky-500" /> {project.startDate}</span>
           </div>
         </div>
 
         {/* Spend progress status right panel */}
         {hasBudget && (
-          <div className="w-full md:w-56 text-right">
-            <div className="flex justify-between text-xs font-semibold mb-1">
-              <span>{language === 'en' ? "Budget Used" : language === 'fr' ? "Budget Utilisé" : "الميزانية المستخدمة"}</span>
-              <span className={`${percentSpent > 100 ? 'text-red-600 font-bold' : 'text-slate-900 dark:text-white font-mono'}`}>{percentSpent}%</span>
+          <div className="w-full md:w-64 shrink-0 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex justify-between items-baseline text-xs font-semibold mb-1.5">
+              <span className="uppercase tracking-wider text-[10px] text-slate-400">{language === 'en' ? "Budget Used" : language === 'fr' ? "Budget Utilisé" : "الميزانية المستخدمة"}</span>
+              <span className={`font-mono text-sm ${percentSpent > 100 ? 'text-red-600 font-bold' : 'text-slate-900 dark:text-white'}`}>{percentSpent}%</span>
             </div>
-            <div className="w-full bg-slate-200 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
+            <div className="w-full bg-slate-100 dark:bg-slate-800 h-2.5 rounded-full overflow-hidden">
               <div 
-                className={`h-full rounded-full transition-all duration-300 ${percentSpent > 100 ? 'bg-red-500' : 'bg-slate-900 dark:bg-slate-50'}`}
+                className={`h-full rounded-full transition-all duration-300 ${percentSpent > 100 ? 'bg-red-500' : 'bg-gradient-to-r from-sky-500 to-blue-600'}`}
                 style={{ width: `${Math.min(100, percentSpent)}%` }}
               />
             </div>
-            <span className="text-[10px] text-slate-400 font-mono mt-1.5 block">
-              {totalSpent.toLocaleString()} / {project.budget.toLocaleString()} {project.currency}
-            </span>
+            <div className="mt-1.5 flex items-baseline justify-between font-mono text-[10px] text-slate-400">
+              <span><span className="font-bold text-slate-700 dark:text-slate-200">{totalSpent.toLocaleString()}</span> / {adjustedBudget.toLocaleString()} {project.currency}</span>
+              {budgetDelta !== 0 && (
+                <span>({project.budget.toLocaleString()} {budgetDelta > 0 ? '+' : ''}{budgetDelta.toLocaleString()})</span>
+              )}
+            </div>
           </div>
         )}
         {!hasBudget && (
-          <div className="w-full md:w-56 text-right">
-            <div className="flex justify-between text-xs font-semibold mb-1">
-              <span>{language === 'en' ? "Total Expenses" : language === 'fr' ? "Total Dépenses" : "إجمالي المصروفات"}</span>
-              <span className="text-slate-900 dark:text-white font-mono">{totalSpent.toLocaleString()} {project.currency}</span>
+          <div className="w-full md:w-64 shrink-0 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex justify-between items-baseline text-xs font-semibold mb-1.5">
+              <span className="uppercase tracking-wider text-[10px] text-slate-400">{language === 'en' ? "Total Expenses" : language === 'fr' ? "Total Dépenses" : "إجمالي المصروفات"}</span>
+              <span className="text-slate-900 dark:text-white font-mono text-sm">{totalSpent.toLocaleString()} {project.currency}</span>
             </div>
-            <div className="w-full bg-slate-200 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
-              <div className="h-full bg-slate-900 dark:bg-slate-50 rounded-full" style={{ width: '100%' }} />
+            <div className="w-full bg-slate-100 dark:bg-slate-800 h-2.5 rounded-full overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-sky-500 to-blue-600 rounded-full" style={{ width: '100%' }} />
             </div>
             <span className="text-[10px] text-slate-400 font-mono mt-1.5 block">
-              {language === 'en' ? 'No budget set for this project type' : language === 'fr' ? 'Aucun budget pour ce type de projet' : 'لا توجد ميزانية لهذا النوع من المشاريع'}
+              {language === 'en' ? 'No budget set — tracking spend only' : language === 'fr' ? 'Sans budget — suivi des dépenses' : 'بدون ميزانية — تتبع المصاريف فقط'}
             </span>
           </div>
         )}
       </div>
 
-      {/* Three Primary Stats Cards (Shadcn style dashboard indicators) */}
+      {/* KPI cards (bento style, matches dashboard) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-1" id="project-kpis">
         {hasBudget ? (
           <>
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === 'en' ? "Project Budget" : language === 'fr' ? "Budget Alloué" : "الميزانية المخصصة"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className="text-xl font-bold font-mono text-slate-900 dark:text-white">{project.budget.toLocaleString()}</span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{project.currency}</span>
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === 'en' ? "Project Budget" : language === 'fr' ? "Budget Alloué" : "الميزانية المخصصة"}</span>
+                <DollarSign className="w-5 h-5 text-slate-400" />
               </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">{adjustedBudget.toLocaleString()}</span>
+                <span className="text-sm text-slate-400 font-mono">{project.currency}</span>
+              </div>
+              <p className="mt-1.5 text-xs text-slate-400 font-mono">
+                {budgetDelta !== 0
+                  ? `${project.budget.toLocaleString()} ${budgetDelta > 0 ? '+' : ''}${budgetDelta.toLocaleString()} ${language === 'en' ? 'approved changes' : language === 'fr' ? 'avenants' : 'تغييرات'}`
+                  : (language === 'en' ? 'Base budget — no change orders' : language === 'fr' ? 'Budget de base' : 'الميزانية الأساسية')}
+              </p>
             </div>
 
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === "en" ? "Cumulative Spent" : language === "fr" ? "Dépenses Cumulées" : "إجمالي المصروفات"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className="text-xl font-bold font-mono text-slate-900 dark:text-white">{totalSpent.toLocaleString()}</span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{project.currency}</span>
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === "en" ? "Cumulative Spent" : language === "fr" ? "Dépenses Cumulées" : "إجمالي المصروفات"}</span>
+                <ReceiptText className="w-5 h-5 text-sky-500" />
               </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">{totalSpent.toLocaleString()}</span>
+                <span className="text-sm text-slate-400 font-mono">{project.currency}</span>
+              </div>
+              <p className="mt-1.5 text-xs text-slate-400">
+                {hasBudget && adjustedBudget > 0
+                  ? (language === 'en' ? `${percentSpent}% of budget used` : language === 'fr' ? `${percentSpent} % du budget utilisé` : `${percentSpent}٪ من الميزانية`)
+                  : (language === 'en' ? 'Commission-inclusive total' : language === 'fr' ? 'Total avec commissions' : 'الإجمالي مع العمولات')}
+              </p>
             </div>
 
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === 'en' ? "Remaining Capital" : language === 'fr' ? "Capital Restant" : "رأس المال المتبقي"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className={`text-xl font-bold font-mono ${(project.budget - totalSpent) < 0 ? 'text-red-500 font-black' : 'text-slate-900 dark:text-white'}`}>
-                  {(project.budget - totalSpent).toLocaleString()}
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === 'en' ? "Remaining Capital" : language === 'fr' ? "Capital Restant" : "رأس المال المتبقي"}</span>
+                <TrendingUp className={`w-5 h-5 ${(adjustedBudget - totalSpent) < 0 ? 'text-red-500' : 'text-emerald-500'}`} />
+              </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className={`text-3xl font-bold font-mono tracking-tight ${(adjustedBudget - totalSpent) < 0 ? 'text-red-500' : 'text-slate-900 dark:text-white'}`}>
+                  {(adjustedBudget - totalSpent).toLocaleString()}
                 </span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{project.currency}</span>
+                <span className="text-sm text-slate-400 font-mono">{project.currency}</span>
               </div>
+              <p className={`mt-1.5 text-xs font-semibold ${(adjustedBudget - totalSpent) < 0 ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                {(adjustedBudget - totalSpent) < 0
+                  ? (language === 'en' ? 'Over budget — review spending' : language === 'fr' ? 'Dépassement — à revoir' : 'تجاوز الميزانية')
+                  : (language === 'en' ? 'Available to spend' : language === 'fr' ? 'Disponible' : 'متاح للإنفاق')}
+              </p>
             </div>
 
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === 'en' ? "Equal Partner Share" : language === 'fr' ? "Quote-part par Membre" : "حصة العضو المتساوية"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className="text-xl font-bold font-mono text-slate-904 dark:text-white">
-                  {Math.round(expectedShares[project.members[0]?.email] || 0).toLocaleString()}
-                </span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{project.currency}</span>
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === 'en' ? "Equal Partner Share" : language === 'fr' ? "Quote-part par Membre" : "حصة العضو المتساوية"}</span>
+                <Users className="w-5 h-5 text-slate-400" />
               </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
+                  {Math.round(expectedShares[acceptedMembers(project)[0]?.email || ''] || 0).toLocaleString()}
+                </span>
+                <span className="text-sm text-slate-400 font-mono">{project.currency}</span>
+              </div>
+              <p className="mt-1.5 text-xs text-slate-400">
+                {language === 'en' ? `Each of ${acceptedMembers(project).length} members` : language === 'fr' ? `Chacun des ${acceptedMembers(project).length} membres` : `لكل من الأعضاء الـ${acceptedMembers(project).length}`}
+              </p>
             </div>
           </>
         ) : (
           <>
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === 'en' ? "Total Expenses" : language === 'fr' ? "Total Dépenses" : "إجمالي المصروفات"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className="text-xl font-bold font-mono text-slate-900 dark:text-white">{totalSpent.toLocaleString()}</span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{project.currency}</span>
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === 'en' ? "Total Expenses" : language === 'fr' ? "Total Dépenses" : "إجمالي المصروفات"}</span>
+                <ReceiptText className="w-5 h-5 text-sky-500" />
               </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">{totalSpent.toLocaleString()}</span>
+                <span className="text-sm text-slate-400 font-mono">{project.currency}</span>
+              </div>
+              <p className="mt-1.5 text-xs text-slate-400">{language === 'en' ? 'Commission-inclusive total' : language === 'fr' ? 'Total avec commissions' : 'الإجمالي مع العمولات'}</p>
             </div>
 
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === 'en' ? "Total Tasks" : language === 'fr' ? "Total Tâches" : "إجمالي المهام"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className="text-xl font-bold font-mono text-slate-900 dark:text-white">{project.tasks.length}</span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{language === 'en' ? 'Tasks' : language === 'fr' ? 'Tâches' : 'مهام'}</span>
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === 'en' ? "Total Tasks" : language === 'fr' ? "Total Tâches" : "إجمالي المهام"}</span>
+                <CheckSquare className="w-5 h-5 text-slate-400" />
               </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">{project.tasks.length}</span>
+                <span className="text-sm text-slate-400">{language === 'en' ? 'Tasks' : language === 'fr' ? 'Tâches' : 'مهام'}</span>
+              </div>
+              <p className="mt-1.5 text-xs text-slate-400">{language === 'en' ? 'Across all roadmap columns' : language === 'fr' ? 'Toutes colonnes' : 'كل الأعمدة'}</p>
             </div>
 
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === 'en' ? "Completed Tasks" : language === 'fr' ? "Tâches Terminées" : "مهام مكتملة"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className="text-xl font-bold font-mono text-emerald-600 dark:text-emerald-400">
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === 'en' ? "Completed Tasks" : language === 'fr' ? "Tâches Terminées" : "مهام مكتملة"}</span>
+                <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+              </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-emerald-600 dark:text-emerald-400 font-mono tracking-tight">
                   {project.tasks.filter(t => t.status === 'completed').length}
                 </span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{language === 'en' ? 'Done' : language === 'fr' ? 'Finis' : 'منجز'}</span>
+                <span className="text-sm text-slate-400">{language === 'en' ? 'Done' : language === 'fr' ? 'Finis' : 'منجز'}</span>
               </div>
+              <p className="mt-1.5 text-xs text-slate-400">
+                {project.tasks.length > 0
+                  ? (language === 'en' ? `${Math.round((project.tasks.filter(t => t.status === 'completed').length / project.tasks.length) * 100)}% completion` : language === 'fr' ? `${Math.round((project.tasks.filter(t => t.status === 'completed').length / project.tasks.length) * 100)} % achevé` : `نسبة الإنجاز ${Math.round((project.tasks.filter(t => t.status === 'completed').length / project.tasks.length) * 100)}٪`)
+                  : (language === 'en' ? 'No tasks yet' : language === 'fr' ? 'Aucune tâche' : 'لا مهام بعد')}
+              </p>
             </div>
 
-            <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xs">
-              <span className="text-[10px] font-bold uppercase text-slate-450 dark:text-slate-400 tracking-wider block">{language === 'en' ? "Team Members" : language === 'fr' ? "Membres Équipe" : "أعضاء الفريق"}</span>
-              <div className="mt-1.5 flex items-baseline gap-1">
-                <span className="text-xl font-bold font-mono text-slate-900 dark:text-white">
+            <div className="p-5 sm:p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
+              <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
+                <span className="text-xs font-bold uppercase tracking-wider font-sans">{language === 'en' ? "Team Members" : language === 'fr' ? "Membres Équipe" : "أعضاء الفريق"}</span>
+                <Users className="w-5 h-5 text-slate-400" />
+              </div>
+              <div className="mt-3 flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
                   {project.members.filter(m => m.status === 'accepted' || !m.status).length}
                 </span>
-                <span className="text-[10px] text-slate-400 font-bold uppercase font-mono">{language === 'en' ? 'Members' : language === 'fr' ? 'Membres' : 'أعضاء'}</span>
+                <span className="text-sm text-slate-400">{language === 'en' ? 'Members' : language === 'fr' ? 'Membres' : 'أعضاء'}</span>
               </div>
+              <p className="mt-1.5 text-xs text-slate-400">{language === 'en' ? 'Accepted partners on site' : language === 'fr' ? 'Partenaires acceptés' : 'الشركاء المقبولون'}</p>
             </div>
           </>
         )}
       </div>
 
       {/* Tabs navigation list with Shadcn styles */}
-      <div className="mb-6 mt-8 flex max-w-full gap-4 overflow-x-auto border-b border-slate-200 pb-px dark:border-slate-800">
+      <div className="mb-8 mt-8 flex max-w-full gap-6 overflow-x-auto border-b border-slate-200 pb-px dark:border-slate-800">
         <button
           id="project-tab-overview"
           onClick={() => setActiveTab('overview')}
-          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-3 text-sm font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'overview' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
@@ -2336,7 +2694,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-expenses"
           onClick={() => setActiveTab('expenses')}
-          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-3 text-sm font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'expenses' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
@@ -2347,7 +2705,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-tasks"
           onClick={() => setActiveTab('tasks')}
-          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-3 text-sm font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'tasks' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
@@ -2358,7 +2716,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-docs"
           onClick={() => setActiveTab('docs')}
-          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-3 text-sm font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'docs' 
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white' 
               : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
@@ -2370,7 +2728,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-gallery"
           onClick={() => setActiveTab('gallery')}
-          className={`shrink-0 whitespace-nowrap pb-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+          className={`shrink-0 whitespace-nowrap pb-3 text-sm font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
             activeTab === 'gallery'
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white'
               : 'border-transparent text-slate-450 hover:text-slate-805 dark:text-slate-400 dark:hover:text-slate-200'
@@ -2383,7 +2741,7 @@ export default function ProjectDetail({
         <button
           id="project-tab-operations"
           onClick={() => setActiveTab('operations')}
-          className={`shrink-0 whitespace-nowrap border-b-2 pb-2 text-xs font-bold uppercase tracking-wider transition-all ${
+          className={`shrink-0 whitespace-nowrap border-b-2 pb-3 text-sm font-bold uppercase tracking-wider transition-all ${
             activeTab === 'operations'
               ? 'border-slate-900 text-slate-900 dark:border-white dark:text-white'
               : 'border-transparent text-slate-450 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
@@ -2412,79 +2770,161 @@ export default function ProjectDetail({
       {/* TAB CONTENT: OVERVIEW & COST SPLITTING */}
       {activeTab === 'overview' && (
         <FadeIn key="overview">
+        {(() => {
+          const today = appDateKey();
+          const doneTasks = project.tasks.filter(t => t.status === 'completed');
+          const openTasks = project.tasks.filter(t => t.status !== 'completed');
+          const dueOf = (t: Task) => t.baselineDeadline || t.deadline || '';
+          const overdueTasks = openTasks.filter(t => { const d = dueOf(t); return d !== '' && d < today; });
+          const blockedTasks = openTasks.filter(t => (t.blockedReason || '').trim() !== '');
+          const upcomingTasks = openTasks
+            .filter(t => dueOf(t) !== '')
+            .sort((a, b) => dueOf(a).localeCompare(dueOf(b)))
+            .slice(0, 3);
+          const completionPct = project.tasks.length > 0 ? Math.round((doneTasks.length / project.tasks.length) * 100) : 0;
+          return (
+            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="flex items-center gap-1.5 font-bold text-sm text-slate-900 dark:text-white">
+                  <CheckSquare className="w-4 h-4 text-sky-500" />
+                  {language === 'en' ? 'Work Status' : language === 'fr' ? 'État des travaux' : 'حالة العمل'}
+                  <span className="font-mono text-[10.5px] text-slate-400 font-semibold">{doneTasks.length}/{project.tasks.length}</span>
+                </h3>
+                <div className="flex items-center gap-1.5">
+                  {overdueTasks.length > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-bold text-rose-700 dark:bg-rose-950/50 dark:text-rose-300">
+                      <AlertTriangle className="w-3 h-3" />{overdueTasks.length} {language === 'en' ? 'overdue' : language === 'fr' ? 'en retard' : 'متأخر'}
+                    </span>
+                  )}
+                  {blockedTasks.length > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+                      {blockedTasks.length} {language === 'en' ? 'blocked' : language === 'fr' ? 'bloquées' : 'معطلة'}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('tasks')}
+                    className="rounded-lg px-2.5 py-1 text-[11px] font-bold text-sky-600 hover:bg-sky-50 dark:text-sky-400 dark:hover:bg-sky-950/40"
+                  >
+                    {language === 'en' ? 'Open roadmap →' : language === 'fr' ? 'Ouvrir le planning →' : 'فتح المخطط ←'}
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-sky-500 to-blue-600 transition-all duration-300"
+                  style={{ width: `${completionPct}%` }}
+                />
+              </div>
+              <div className="mt-1 flex items-center justify-between text-[10px] font-mono text-slate-400">
+                <span>{completionPct}% {language === 'en' ? 'complete' : language === 'fr' ? 'achevé' : 'منجز'}</span>
+                <span>{openTasks.length} {language === 'en' ? 'open' : language === 'fr' ? 'ouvertes' : 'مفتوحة'}</span>
+              </div>
+              {upcomingTasks.length > 0 && (
+                <ul className="mt-3 divide-y divide-slate-100 rounded-xl border border-slate-100 dark:divide-slate-800 dark:border-slate-800">
+                  {upcomingTasks.map((task) => {
+                    const due = dueOf(task);
+                    const isOverdue = due < today;
+                    const owner = project.members.find(m => m.email === taskOwnerEmail(task));
+                    return (
+                      <li key={task.id}>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedTaskId(task.id)}
+                          className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50"
+                        >
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${isOverdue ? 'bg-rose-500' : task.status === 'in_progress' ? 'bg-sky-500' : 'bg-slate-300 dark:bg-slate-600'}`} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-xs font-semibold text-slate-800 dark:text-slate-100">{task.title}</span>
+                            <span className="block truncate text-[10px] text-slate-400">{owner?.name || taskOwnerEmail(task) || ''}</span>
+                          </span>
+                          {task.milestone && (
+                            <span className="shrink-0 rounded bg-violet-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-violet-700 dark:bg-violet-950/50 dark:text-violet-300">
+                              {language === 'en' ? 'Milestone' : language === 'fr' ? 'Jalon' : 'محطة'}
+                            </span>
+                          )}
+                          <span className={`shrink-0 font-mono text-[10px] ${isOverdue ? 'font-bold text-rose-600 dark:text-rose-400' : 'text-slate-400'}`}>{due}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          );
+        })()}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* Members / Who Paid What Visual Progress Bars (2 cols wide on large) */}
           {project.projectType !== 'service' && (
           <div className="lg:col-span-2 space-y-6">
-            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 p-5 rounded-xl">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 sm:p-6 rounded-2xl shadow-sm">
               <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center justify-between mb-4">
                 <span className="flex items-center gap-1.5">
-                  <TrendingUp className="w-4 h-4 text-sky-505" />
+                  <TrendingUp className="w-4 h-4 text-sky-500" />
                   {language === 'en' ? 'Accumulated Expenditure per Member' : language === 'fr' ? 'Total payé par membre' : 'إجمالي النفقات لكل عضو'}
                 </span>
-                <span className="font-mono text-[10.5px] text-slate-400 font-semibold">{project.members.length} {language === "en" ? "Partakers" : language === "fr" ? "Membres" : "أعضاء"}</span>
+                <span className="rounded-full bg-slate-100 px-2 py-0.5 font-mono text-[10.5px] text-slate-500 font-semibold dark:bg-slate-800 dark:text-slate-400">{acceptedMembers(project).length} {language === "en" ? "Partakers" : language === "fr" ? "Membres" : "أعضاء"}</span>
               </h3>
 
               {/* Each Member's contribution progress grid */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 {project.members.filter(m => m.status === 'accepted' || !m.status).map((member) => {
                   const amtPaid = paidMap[member.email] || 0;
                   const targetShare = expectedShares[member.email] || 0;
                   const balance = amtPaid - targetShare;
 
-                  // High contrast bar share representation
-                  const progressWidth = totalSpent > 0 ? (amtPaid / totalSpent) * 100 : 0;
+                  // Bar shows progress toward this member's own share (100% = share covered).
+                  const progressWidth = targetShare > 0
+                    ? Math.min(100, (amtPaid / targetShare) * 100)
+                    : amtPaid > 0 ? 100 : 0;
 
                   return (
-                    <div key={member.email} className="text-xs">
-                      <div className="flex justify-between items-center mb-1 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 rounded-lg border border-slate-100 dark:border-slate-850">
-                        <div className="flex items-center gap-2">
-                          <div className="h-5 w-5 rounded bg-slate-900 dark:bg-slate-100 text-white dark:text-black flex items-center justify-center font-bold text-[9px]">
-                            {member.name.charAt(0)}
+                    <div key={member.email} className="rounded-xl border border-slate-100 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-950/50">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-xs font-bold text-white dark:bg-slate-100 dark:text-slate-900">
+                            {member.name.charAt(0).toUpperCase()}
                           </div>
-                          <div>
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="font-semibold text-slate-900 dark:text-white">{member.name}</span>
-                              <span className="text-[9px] font-semibold text-slate-400 font-mono leading-none">({member.role})</span>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="truncate text-xs font-bold text-slate-900 dark:text-white">{member.name}</span>
+                              <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[9px] font-semibold capitalize text-slate-500 dark:bg-slate-800 dark:text-slate-400">{member.role.replace('_', ' ')}</span>
                               {member.status === 'pending' && (
-                                <span className="text-[8px] bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400 px-1 py-0.5 rounded font-mono font-bold uppercase tracking-wider select-none">
+                                <span className="rounded bg-amber-100 px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-wider text-amber-800 dark:bg-amber-950/40 dark:text-amber-400 select-none">
                                   {language === 'en' ? 'Pending' : language === 'fr' ? 'En attente' : 'معلق'}
                                 </span>
                               )}
                               {member.status === 'declined' && (
-                                <span className="text-[8px] bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-400 px-1 py-0.5 rounded font-mono font-bold uppercase tracking-wider select-none">
+                                <span className="rounded bg-red-100 px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-wider text-red-800 dark:bg-red-950/40 dark:text-red-400 select-none">
                                   {language === 'en' ? 'Declined' : language === 'fr' ? 'Refusé' : 'مرفوض'}
                                 </span>
                               )}
                             </div>
-                            <span className="text-[9.5px] text-slate-400 block font-mono lowercase mt-0.5">{member.email}</span>
+                            <span className="mt-0.5 block truncate font-mono text-[10px] lowercase text-slate-400">{member.email}</span>
                           </div>
                         </div>
 
                         {/* Financial summary: Paid vs Balance owed */}
-                        <div className="text-right">
-                          <span className="font-semibold font-mono text-slate-900 dark:text-white">{amtPaid.toLocaleString()} {project.currency}</span>
-                          {isSettlementWorkspace && (
-                          <span className="text-[10px] text-slate-400 block font-sans">
-                            {balance >= 0 ? (
-                              <span className="text-emerald-600 font-bold flex items-center justify-end gap-0.5">
-                                +{Math.round(balance).toLocaleString()} {language === 'en' ? 'surplus' : language === 'fr' ? 'de trop' : 'فائض'}
-                              </span>
-                            ) : (
-                              <span className="text-red-500 font-bold flex items-center justify-end gap-0.5">
-                                {Math.round(balance).toLocaleString()} {language === 'en' ? 'due' : language === 'fr' ? 'dû' : 'مستحق'}
-                              </span>
-                            )}
+                        <div className="shrink-0 text-right">
+                          <span className="font-mono text-sm font-bold text-slate-900 dark:text-white">{amtPaid.toLocaleString()}</span>
+                          <span className="block font-mono text-[10px] text-slate-400">
+                            {language === 'en' ? 'of' : language === 'fr' ? 'sur' : 'من'} {Math.round(targetShare).toLocaleString()} {project.currency}
                           </span>
+                          {isSettlementWorkspace && (
+                            <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${balance >= 0 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300' : 'bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300'}`}>
+                              {balance >= 0
+                                ? `+${Math.round(balance).toLocaleString()} ${language === 'en' ? 'surplus' : language === 'fr' ? 'de trop' : 'فائض'}`
+                                : `${Math.round(balance).toLocaleString()} ${language === 'en' ? 'due' : language === 'fr' ? 'dû' : 'مستحق'}`}
+                            </span>
                           )}
                         </div>
                       </div>
 
                       {/* Bar tracker */}
-                      <div className="w-full bg-slate-100 dark:bg-slate-850 h-2.5 rounded-full overflow-hidden mt-1 mb-2.5">
+                      <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-slate-200/70 dark:bg-slate-800">
                         <div 
-                          className="bg-slate-900 dark:bg-slate-100 h-full rounded-full transition-all duration-300"
+                          className={`h-full rounded-full transition-all duration-300 ${progressWidth >= 100 ? 'bg-emerald-500' : 'bg-gradient-to-r from-sky-500 to-blue-600'}`}
                           style={{ width: `${progressWidth}%` }}
                         />
                       </div>
@@ -2547,10 +2987,15 @@ export default function ProjectDetail({
           <div className="space-y-6">
             {/* Settlements Solver Box */}
             {isSettlementWorkspace && (
-            <div className="bg-white dark:bg-slate-900 text-slate-950 dark:text-white rounded-xl p-5 border border-slate-200 dark:border-slate-805 relative shadow-md">
-              <h3 className="font-bold text-sm flex items-center gap-1.5 mb-4 text-slate-900 dark:text-white">
+            <div className="bg-white dark:bg-slate-900 text-slate-950 dark:text-white rounded-2xl p-5 sm:p-6 border border-slate-200 dark:border-slate-800 relative shadow-sm">
+              <h3 className="font-bold text-sm flex items-center gap-1.5 mb-1.5 text-slate-900 dark:text-white">
                 <CreditCard className="w-4 h-4 text-sky-500 dark:text-sky-400" />
                 {language === 'en' ? 'Settle Balance Debt Advice' : language === 'fr' ? 'Calculateur d\'Équilibre' : 'نصيحة تسوية الديون'}
+                {settlements.length > 0 && (
+                  <span className="ml-auto rounded-full bg-sky-100 px-2 py-0.5 font-mono text-[10px] font-bold text-sky-700 dark:bg-sky-950/50 dark:text-sky-300">
+                    {settlements.length}
+                  </span>
+                )}
               </h3>
 
               {settlements.length === 0 ? (
@@ -2563,31 +3008,33 @@ export default function ProjectDetail({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <p className="text-xs text-slate-600 dark:text-slate-350 leading-relaxed font-sans font-medium">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                     {language === 'en' 
-                      ? 'The model automatically calculates the fewest cash payments to settle accounts:' 
+                      ? 'The fewest cash payments to settle every account:' 
                       : language === 'fr' 
-                      ? 'La formule détermine la répartition la plus courte pour équilibrer les comptes:' 
-                      : 'يحسب النموذج تلقائياً أقل عدد من الدفعات النقدية لتسوية الحسابات بين الشركاء:'}
+                      ? 'Le moins de paiements pour équilibrer les comptes:' 
+                      : 'أقل عدد من الدفعات لتسوية الحسابات:'}
                   </p>
                   
-                  <div className="space-y-2.5 pt-2">
+                  <div className="space-y-2.5 pt-1">
                     {settlements.map((s, idx) => (
                       <div 
                         key={idx} 
-                        className="p-3 bg-slate-50 dark:bg-slate-950/40 border border-slate-150 dark:border-slate-850 rounded-lg flex flex-col justify-between gap-2.5 text-xs font-sans"
+                        className="p-3.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-xl text-xs"
                       >
-                        <div className="flex justify-between items-center">
-                          <span className="font-medium text-slate-800 dark:text-slate-200">{s.fromName}</span>
-                          <span className="text-[9.5px] font-mono text-slate-400 dark:text-slate-500">{language === 'en' ? 'owes' : language === 'fr' ? 'doit' : 'مدين لـ'}</span>
-                          <span className="font-medium text-slate-800 dark:text-slate-200">{s.toName}</span>
+                        <div className="flex items-center gap-2 text-[13px]">
+                          <span className="font-bold text-slate-900 dark:text-white truncate">{s.fromName}</span>
+                          <span className="flex shrink-0 items-center gap-1 font-mono text-[10px] text-slate-400">
+                            ─ <span>{language === 'en' ? 'pays' : language === 'fr' ? 'paie' : 'يدفع'}</span> ─▶
+                          </span>
+                          <span className="font-bold text-slate-900 dark:text-white truncate">{s.toName}</span>
                         </div>
-                        <div className="flex justify-between items-center pt-1.5 border-t border-slate-200 dark:border-slate-800/60">
-                          <span className="font-mono font-bold text-xl text-sky-600 dark:text-sky-400">{s.amount.toLocaleString()} {project.currency}</span>
+                        <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2.5 dark:border-slate-800/60">
+                          <span className="font-mono font-bold text-lg text-sky-600 dark:text-sky-400">{s.amount.toLocaleString()} <span className="text-[10px] font-semibold">{project.currency}</span></span>
                           {perm.canManageReimbursements && (
                             <button
                               onClick={() => handleRecordReimbursement(s.from, s.to, s.amount)}
-                              className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-slate-200 text-white dark:text-slate-950 font-bold text-[10px] uppercase tracking-wider transition-all cursor-pointer shadow-sm animate-none"
+                              className="shrink-0 rounded-lg bg-slate-900 px-3 py-1.5 text-white font-bold text-[10px] uppercase tracking-wider transition-all cursor-pointer shadow-sm hover:bg-slate-700 dark:bg-slate-100 dark:hover:bg-slate-200 dark:text-slate-950"
                             >
                               {language === 'en' ? "Record Settle" : language === 'fr' ? "Remit" : "تسجيل الدفع"}
                             </button>
@@ -2705,6 +3152,11 @@ export default function ProjectDetail({
                               {language === 'en' ? 'Invited' : 'Invité'}
                             </span>
                           )}
+                          {m.status === 'declined' && (
+                            <span className="text-[8px] bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400 px-1 py-0.5 rounded font-mono font-bold uppercase tracking-wider leading-none">
+                              {language === 'en' ? 'Declined' : language === 'fr' ? 'Refusée' : 'مرفوضة'}
+                            </span>
+                          )}
                         </div>
                         <span className="text-[10px] font-mono text-slate-400 font-medium capitalize mt-0.5 block">
                           {perm.canManageMembers && m.email.toLowerCase() !== project.creatorEmail.toLowerCase() && m.status !== 'pending' ? (
@@ -2728,22 +3180,38 @@ export default function ProjectDetail({
                       </div>
                     </div>
                     {perm.canManageMembers && m.email.toLowerCase() !== project.creatorEmail.toLowerCase() && (
-                      <button
-                        type="button"
-                        onClick={() => promptRemoveMember(m.email, m.name, m.status === 'pending')}
-                        className={`rounded transition-colors cursor-pointer ${
-                          m.status === 'pending'
-                            ? 'px-2 py-1 text-[10px] font-semibold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30'
-                            : 'p-1 text-slate-400 hover:text-red-500 hover:bg-slate-50 dark:hover:bg-slate-850'
-                        }`}
-                        title={m.status === 'pending' ? (language === 'en' ? 'Cancel invitation' : language === 'fr' ? 'Annuler l’invitation' : 'إلغاء الدعوة') : 'Remove member'}
-                      >
-                        {m.status === 'pending' ? (
-                          language === 'en' ? 'Cancel' : language === 'fr' ? 'Annuler' : 'إلغاء'
-                        ) : (
-                          <Trash2 className="w-3.5 h-3.5" />
+                      <div className="flex items-center gap-1">
+                        {(m.status === 'pending' || m.status === 'declined') && (
+                          <button
+                            type="button"
+                            disabled={memberActionBusy === m.email}
+                            onClick={() => handleResendInvitation(m.email)}
+                            className="px-2 py-1 text-[10px] font-semibold text-sky-600 hover:bg-sky-50 dark:text-sky-400 dark:hover:bg-sky-950/30 rounded transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                            title={language === 'en' ? 'Send a fresh invitation' : language === 'fr' ? 'Renvoyer une invitation' : 'إرسال دعوة جديدة'}
+                          >
+                            {memberActionBusy === m.email
+                              ? '…'
+                              : (language === 'en' ? 'Resend' : language === 'fr' ? 'Renvoyer' : 'إعادة إرسال')}
+                          </button>
                         )}
-                      </button>
+                        <button
+                          type="button"
+                          disabled={memberActionBusy === m.email}
+                          onClick={() => promptRemoveMember(m.email, m.name, m.status === 'pending')}
+                          className={`rounded transition-colors cursor-pointer disabled:cursor-wait disabled:opacity-60 ${
+                            m.status === 'pending'
+                              ? 'px-2 py-1 text-[10px] font-semibold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30'
+                              : 'p-1 text-slate-400 hover:text-red-500 hover:bg-slate-50 dark:hover:bg-slate-850'
+                          }`}
+                          title={m.status === 'pending' ? (language === 'en' ? 'Cancel invitation' : language === 'fr' ? 'Annuler l’invitation' : 'إلغاء الدعوة') : 'Remove member'}
+                        >
+                          {m.status === 'pending' ? (
+                            language === 'en' ? 'Cancel' : language === 'fr' ? 'Annuler' : 'إلغاء'
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
                     )}
                   </div>
                 ))}
@@ -2795,7 +3263,7 @@ export default function ProjectDetail({
                     className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
                   >
                     <FileText className="w-4 h-4" />
-                    <span>{language === 'en' ? 'Export Excel' : language === 'fr' ? 'Exporter Excel' : 'تصدير إكسل'}</span>
+                    <span>{language === 'en' ? 'Export CSV' : language === 'fr' ? 'Exporter CSV' : 'تصدير CSV'}</span>
                   </button>
                   {showExportPicker && (
                     <div className="absolute right-0 top-full mt-1 z-50 w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-lg p-3">
@@ -2821,11 +3289,11 @@ export default function ProjectDetail({
                         })}
                       </div>
                       <button
-                        onClick={handleExportExpensesExcel}
+                        onClick={handleExportExpensesCsv}
                         disabled={selectedExportCols.size === 0}
                         className="mt-2 w-full px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 dark:disabled:bg-slate-700 text-white transition-all cursor-pointer disabled:cursor-not-allowed"
                       >
-                        {language === 'en' ? 'Download Excel' : language === 'fr' ? 'Télécharger Excel' : 'تحميل إكسل'}
+                        {language === 'en' ? 'Download CSV' : language === 'fr' ? 'Télécharger CSV' : 'تحميل CSV'}
                       </button>
                     </div>
                   )}
@@ -2906,6 +3374,7 @@ export default function ProjectDetail({
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
                     {visibleExpenses.map((exp, index) => {
                       const payer = project.members.find(m => m.email === exp.paidBy);
+                      const receipts: TaskMedia[] = exp.receiptFiles || [];
                       return (
                         <motion.tr
                           key={exp.id}
@@ -2923,17 +3392,31 @@ export default function ProjectDetail({
                             <span className="text-[10px] text-slate-400 font-medium block">{exp.supplier} · {exp.description}</span>
                           </td>
                           <td className="py-3">
-                            {exp.receiptFiles?.[0] ? (
-                              <ExpenseReceiptThumb
-                                media={exp.receiptFiles[0]}
-                                label={
-                                  language === 'en'
-                                    ? 'Supplier receipt'
-                                    : language === 'fr'
-                                      ? 'Bon fournisseur'
-                                      : 'وصل المورد'
-                                }
-                              />
+                            {receipts.length > 0 ? (
+                              <div className="flex items-center gap-1.5">
+                                <div className="flex -space-x-1.5">
+                                  {receipts.slice(0, 3).map((media) => (
+                                    <span key={media.id} className="shrink-0">
+                                      <ExpenseReceiptThumb
+                                        media={media}
+                                        gallery={receipts}
+                                        label={
+                                          language === 'en'
+                                            ? 'Supplier receipt'
+                                            : language === 'fr'
+                                              ? 'Bon fournisseur'
+                                              : 'وصل المورد'
+                                        }
+                                      />
+                                    </span>
+                                  ))}
+                                </div>
+                                {receipts.length > 1 && (
+                                  <span className="rounded-full bg-slate-100 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 dark:bg-slate-850 dark:text-slate-400">
+                                    ×{receipts.length}
+                                  </span>
+                                )}
+                              </div>
                             ) : (
                               <span className="text-[10px] text-slate-300">—</span>
                             )}
@@ -3072,13 +3555,57 @@ export default function ProjectDetail({
                 canEdit={perm.canManageTasks}
                 canEditTask={(t) => canEditTask(t, project, userEmail, userRole)}
                 canDeleteTask={(t) => canDeleteTask(t, project, userEmail, userRole)}
+                editDenialReason={(t) => taskEditDenialReason(t, project, userEmail, userRole, language)}
                 onStatusChange={updateTaskStatus}
                 onOpenTask={setSelectedTaskId}
                 onDeleteTask={promptDeleteTask}
+                onBlockedStatusChange={(reason) =>
+                  showAlert(
+                    language === 'en' ? 'Cannot complete task' : language === 'fr' ? 'Impossible de terminer la tâche' : 'لا يمكن إنهاء المهمة',
+                    reason,
+                    'info'
+                  )
+                }
                 focusElementId={aiFocusId}
               />
             )}
           </div>
+
+          {project.projectType !== 'rental' && (
+            <ProjectSectionsManager
+              project={project}
+              language={language}
+              canEdit={perm.canManageTasks}
+              readOnlyReason={
+                language === 'en'
+                  ? 'Only owners and managers can edit sections'
+                  : language === 'fr'
+                    ? 'Seuls les propriétaires et gestionnaires modifient les sections'
+                    : 'الماليون والمديرون فقط يعدّلون الأقسام'
+              }
+              onSave={async (sections) => {
+                const ok = await syncProjectChanges({ ...project, sections });
+                if (ok) {
+                  await trackActivity(
+                    'section_updated',
+                    language === 'en'
+                      ? `Updated project sections (${sections.length}).`
+                      : language === 'fr'
+                        ? `Sections du projet mises à jour (${sections.length}).`
+                        : `تم تحديث أقسام المشروع (${sections.length}).`
+                  );
+                }
+                return ok;
+              }}
+              onNotify={(message) =>
+                showAlert(
+                  language === 'en' ? 'Save failed' : language === 'fr' ? 'Échec de l\'enregistrement' : 'فشل الحفظ',
+                  message,
+                  'danger'
+                )
+              }
+            />
+          )}
         </div>
         </FadeIn>
       )}
@@ -3268,116 +3795,183 @@ export default function ProjectDetail({
       {activeTab === 'docs' && (
         <FadeIn key="docs">
         <div className="space-y-4">
-          <div className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:flex-row sm:items-center sm:justify-between no-print">
+          <div className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 lg:flex-row lg:items-center lg:justify-between no-print">
             <div>
               <h2 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
                 <span className="flex h-8 w-8 items-center justify-center rounded-md bg-sky-500/10 text-sky-600 dark:text-sky-400">
                   <FileText className="w-4 h-4" />
                 </span>
-                {language === 'en' ? 'Invoices & Vouchers' : language === 'fr' ? 'Factures & Bons' : 'الفواتير والإيصالات'}
+                {language === 'en' ? 'Facturation' : language === 'fr' ? 'Facturation' : 'الفوترة'}
               </h2>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                 {language === 'en'
-                  ? 'Configure your document, import expenses, then save as PDF.'
+                  ? 'Draft → finalize → get paid. Import expenses, preview, save as PDF.'
                   : language === 'fr'
-                    ? 'Configurez le document, importez les frais, puis imprimez.'
-                    : 'اضبط المستند، استورد المصاريف، ثم اطبع.'}
+                    ? 'Brouillon → finalisé → payé. Importez les frais, prévisualisez, exportez en PDF.'
+                    : 'مسودة ← نهائي ← مدفوع. استورد المصاريف، عاين، واحفظ PDF.'}
               </p>
             </div>
-            <div className="grid w-full grid-cols-3 divide-x divide-slate-200 overflow-hidden rounded-md border border-slate-200 text-center dark:divide-slate-800 dark:border-slate-800 sm:w-auto">
-              <div className="min-w-0 px-2 py-2 sm:min-w-[4.75rem] sm:px-3">
-                <span className="block text-[9px] font-bold uppercase text-slate-400">{language === 'en' ? 'Type' : language === 'fr' ? 'Type' : 'النوع'}</span>
-                <span className="mt-0.5 block text-[11px] font-bold text-slate-800 dark:text-slate-100">
-                  {docType === 'invoice' ? (language === 'en' ? 'Invoice' : language === 'fr' ? 'Facture' : 'فاتورة') : docType === 'voucher' ? (language === 'en' ? 'Voucher' : language === 'fr' ? 'Bon' : 'سند') : (language === 'en' ? 'Receipt' : language === 'fr' ? 'Reçu' : 'إيصال')}
-                </span>
-              </div>
-              <div className="min-w-0 px-2 py-2 sm:min-w-[4.75rem] sm:px-3">
-                <span className="block text-[9px] font-bold uppercase text-slate-400">{language === 'en' ? 'Lines' : language === 'fr' ? 'Lignes' : 'البنود'}</span>
-                <span className="mt-0.5 block text-[11px] font-mono font-bold text-slate-800 dark:text-slate-100">{docItems.length}</span>
-              </div>
-              <div className="min-w-0 px-2 py-2 sm:min-w-[5.5rem] sm:px-3">
-                <span className="block text-[9px] font-bold uppercase text-slate-400">{language === 'en' ? 'Total' : language === 'fr' ? 'Total' : 'الإجمالي'}</span>
-                <span className="mt-0.5 block text-[11px] font-mono font-bold text-sky-600 dark:text-sky-400">{docTotal.toLocaleString()} {project.currency}</span>
-              </div>
+            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by status">
+              {(['all', 'draft', 'finalized', 'paid'] as const).map((status) => {
+                const count = status === 'all'
+                  ? savedCivilDocuments.length
+                  : savedCivilDocuments.filter((d) => d.status === status).length;
+                const label = status === 'all'
+                  ? (language === 'en' ? 'All' : language === 'fr' ? 'Tous' : 'الكل')
+                  : status === 'draft'
+                    ? (language === 'en' ? 'Draft' : language === 'fr' ? 'Brouillon' : 'مسودة')
+                    : status === 'finalized'
+                      ? (language === 'en' ? 'Finalized' : language === 'fr' ? 'Finalisé' : 'نهائي')
+                      : (language === 'en' ? 'Paid' : language === 'fr' ? 'Payé' : 'مدفوع');
+                const isActive = docListStatus === status;
+                return (
+                  <button
+                    key={status}
+                    type="button"
+                    onClick={() => setDocListStatus(status)}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-bold transition-all cursor-pointer ${isActive ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-400 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300'}`}
+                  >
+                    {label}
+                    <span className={`rounded-full px-1.5 font-mono text-[10px] ${isActive ? 'bg-white/20 dark:bg-slate-900/10' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{count}</span>
+                  </button>
+                );
+              })}
+              {savedCivilDocuments.some((d) => d.status === 'cancelled') && (
+                <button
+                  type="button"
+                  onClick={() => setDocListStatus(docListStatus === 'cancelled' ? 'all' : 'cancelled')}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-bold transition-all cursor-pointer ${docListStatus === 'cancelled' ? 'border-rose-500 bg-rose-500 text-white' : 'border-slate-200 bg-white text-slate-400 hover:border-rose-300 dark:border-slate-800 dark:bg-slate-950'}`}
+                >
+                  {language === 'en' ? 'Cancelled' : language === 'fr' ? 'Annulé' : 'ملغي'}
+                  <span className="rounded-full bg-slate-100 px-1.5 font-mono text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">{savedCivilDocuments.filter((d) => d.status === 'cancelled').length}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={startNewCivilDocument}
+                className="ml-1 inline-flex items-center justify-center gap-1.5 rounded-full bg-sky-600 px-4 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-sky-500 cursor-pointer"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {language === 'en' ? 'New' : language === 'fr' ? 'Nouveau' : 'جديد'}
+              </button>
             </div>
           </div>
 
           <section className="no-print rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-2 border-b border-slate-100 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center">
               <div>
                 <h3 className="text-xs font-bold text-slate-900 dark:text-white">
-                  {language === 'fr' ? 'Documents enregistres' : language === 'ar' ? 'Saved documents' : 'Saved documents'}
+                  {language === 'en' ? 'Documents' : language === 'fr' ? 'Documents' : 'المستندات'}
                 </h3>
                 <p className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
-                  {language === 'fr' ? 'Brouillons et documents finalises de ce projet.' : 'Drafts and finalized documents for this project.'}
+                  {language === 'en' ? 'Drafts and finalized documents for this project.' : language === 'fr' ? 'Brouillons et documents finalisés de ce projet.' : 'مسودات ومستندات هذا المشروع.'}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={startNewCivilDocument}
-                className="inline-flex items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                {language === 'fr' ? 'Nouveau document' : 'New document'}
-              </button>
-            </div>
-            <div className="overflow-x-auto p-3">
-              {savedCivilDocuments.length === 0 ? (
-                <p className="px-1 py-3 text-center text-xs text-slate-500 dark:text-slate-400">
-                  {language === 'fr' ? 'Aucun document enregistre.' : 'No saved documents yet.'}
-                </p>
-              ) : (
-                <div className="flex min-w-max gap-2">
-                  {savedCivilDocuments.slice(0, 12).map((savedDocument) => (
-                    <div
-                      key={savedDocument.id}
-                      className={`w-64 rounded-md border p-3 ${
-                        activeCivilDocumentId === savedDocument.id
-                          ? 'border-sky-400 bg-sky-50 dark:border-sky-700 dark:bg-sky-950/30'
-                          : 'border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-950/40'
-                      }`}
+              <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+                <div className="flex flex-wrap items-center gap-1">
+                  {(['all', 'invoice', 'voucher', 'receipt'] as const).map((kindOption) => (
+                    <button
+                      key={kindOption}
+                      type="button"
+                      onClick={() => setDocListKind(kindOption)}
+                      className={`rounded-full px-2.5 py-1 text-[11px] font-bold transition-all cursor-pointer ${docListKind === kindOption ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'bg-slate-100 text-slate-500 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400'}`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate font-mono text-xs font-bold text-slate-900 dark:text-white">{savedDocument.number}</p>
-                          <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400">
-                            {savedDocument.recipient.name || (language === 'fr' ? 'Sans destinataire' : 'No recipient')}
-                          </p>
-                        </div>
-                        <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[9px] font-bold uppercase text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                          {savedDocument.status}
-                        </span>
-                      </div>
-                      <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-2 dark:border-slate-800">
-                        <span className="font-mono text-[11px] font-bold text-sky-600 dark:text-sky-400">
-                          {savedDocument.total.toLocaleString()} {savedDocument.currency}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => loadCivilDocumentIntoEditor(savedDocument)}
-                            className="rounded-md px-2 py-1 text-[10px] font-bold text-slate-700 hover:bg-white dark:text-slate-200 dark:hover:bg-slate-800"
-                          >
-                            {language === 'fr' ? 'Ouvrir' : 'Open'}
-                          </button>
-                          {savedDocument.status !== 'cancelled' && (
-                            <button
-                              type="button"
-                              title={language === 'fr' ? 'Annuler le document' : 'Cancel document'}
-                              aria-label={language === 'fr' ? 'Annuler le document' : 'Cancel document'}
-                              onClick={() => promptCancelCivilDocument(savedDocument)}
-                              className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+                      {kindOption === 'all'
+                        ? (language === 'en' ? 'All types' : language === 'fr' ? 'Tous' : 'الكل')
+                        : kindOption === 'invoice'
+                          ? (language === 'en' ? 'Invoices' : language === 'fr' ? 'Factures' : 'فواتير')
+                          : kindOption === 'voucher'
+                            ? (language === 'en' ? 'Vouchers' : language === 'fr' ? 'Bons' : 'سندات')
+                            : (language === 'en' ? 'Receipts' : language === 'fr' ? 'Reçus' : 'إيصالات')}
+                    </button>
                   ))}
                 </div>
-              )}
+                <input
+                  type="search"
+                  value={docListQuery}
+                  onChange={(e) => setDocListQuery(e.target.value)}
+                  placeholder={language === 'en' ? 'Search number, recipient…' : language === 'fr' ? 'N°, destinataire…' : 'ابحث برقم أو مستلم…'}
+                  className="h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-900 outline-none focus:border-sky-500 dark:border-slate-800 dark:bg-slate-950 dark:text-white sm:w-52"
+                />
+              </div>
             </div>
+            {(() => {
+              const needle = docListQuery.trim().toLowerCase();
+              const visible = savedCivilDocuments.filter((savedDocument) => {
+                if (docListKind !== 'all' && savedDocument.kind !== docListKind) return false;
+                if (docListStatus !== 'all' && savedDocument.status !== docListStatus) return false;
+                if (needle && ![savedDocument.number, savedDocument.recipient.name, savedDocument.notes].filter(Boolean).some((v) => String(v).toLowerCase().includes(needle))) return false;
+                return true;
+              });
+              if (savedCivilDocuments.length === 0) {
+                return (
+                  <p className="px-4 py-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                    {language === 'en' ? 'No saved documents yet — create the first one above.' : language === 'fr' ? 'Aucun document — créez le premier ci-dessus.' : 'لا مستندات بعد — أنشئ الأول أعلاه.'}
+                  </p>
+                );
+              }
+              if (visible.length === 0) {
+                return (
+                  <p className="px-4 py-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                    {language === 'en' ? 'No documents match these filters.' : language === 'fr' ? 'Aucun document pour ces filtres.' : 'لا مستندات مطابقة.'}
+                  </p>
+                );
+              }
+              const statusStyle = (status: CivilDocumentRecord['status']) =>
+                status === 'paid'
+                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300'
+                  : status === 'finalized'
+                    ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300'
+                    : status === 'cancelled'
+                      ? 'bg-slate-200 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                      : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300';
+              const statusLabel = (status: CivilDocumentRecord['status']) =>
+                status === 'draft'
+                  ? (language === 'en' ? 'Draft' : language === 'fr' ? 'Brouillon' : 'مسودة')
+                  : status === 'finalized'
+                    ? (language === 'en' ? 'Finalized' : language === 'fr' ? 'Finalisé' : 'نهائي')
+                    : status === 'paid'
+                      ? (language === 'en' ? 'Paid' : language === 'fr' ? 'Payé' : 'مدفوع')
+                      : (language === 'en' ? 'Cancelled' : language === 'fr' ? 'Annulé' : 'ملغي');
+              return (
+                <ul className="max-h-72 divide-y divide-slate-100 overflow-y-auto dark:divide-slate-800">
+                  {visible.map((savedDocument) => (
+                    <li
+                      key={savedDocument.id}
+                      className={`flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors hover:bg-slate-50 dark:hover:bg-slate-950/60 ${activeCivilDocumentId === savedDocument.id ? 'bg-sky-50/60 dark:bg-sky-950/20' : ''}`}
+                      onClick={() => loadCivilDocumentIntoEditor(savedDocument)}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-mono text-xs font-bold text-slate-900 dark:text-white">{savedDocument.number}</p>
+                        <p className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-slate-400">
+                          {(savedDocument.recipient.name || (language === 'en' ? 'No recipient' : language === 'fr' ? 'Sans destinataire' : 'بدون مستلم'))} · {savedDocument.documentDate}
+                        </p>
+                      </div>
+                      <span className="hidden shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-slate-400 sm:block">
+                        {savedDocument.kind === 'invoice' ? 'FAC' : savedDocument.kind === 'voucher' ? 'BON' : 'REC'}
+                      </span>
+                      <span className="shrink-0 font-mono text-[11px] font-bold text-slate-900 dark:text-slate-100">
+                        {savedDocument.total.toLocaleString()} {savedDocument.currency}
+                      </span>
+                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase ${statusStyle(savedDocument.status)}`}>
+                        {statusLabel(savedDocument.status)}
+                      </span>
+                      {savedDocument.status !== 'cancelled' && (
+                        <button
+                          type="button"
+                          title={language === 'en' ? 'Cancel document' : language === 'fr' ? 'Annuler le document' : 'إلغاء المستند'}
+                          aria-label={language === 'en' ? 'Cancel document' : language === 'fr' ? 'Annuler le document' : 'إلغاء المستند'}
+                          onClick={(e) => { e.stopPropagation(); promptCancelCivilDocument(savedDocument); }}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
           </section>
 
           <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(34rem,0.9fr)_minmax(0,1.5fr)]">
@@ -3388,18 +3982,21 @@ export default function ProjectDetail({
               {/* Setup and expense selection use the full editor width. */}
               <div className="grid grid-cols-1 gap-4">
               
-              {/* Document Presets */}
-              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm flex flex-col min-h-0 min-w-0">
-                <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-850 shrink-0 bg-slate-50/70 dark:bg-slate-950/30">
-                  <h3 className="font-bold text-xs text-slate-900 dark:text-white flex items-center gap-2">
+              {/* Step 1 — Document: type, dates, numbering */}
+              <details open className="ux-details bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm min-w-0">
+                <summary className="px-4 py-3 list-none [&::-webkit-details-marker]:hidden">
+                  <span className="flex items-center gap-2 font-bold text-xs text-slate-900 dark:text-white">
                     <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400">
                       <Sliders className="w-3.5 h-3.5" />
                     </span>
-                    {language === 'en' ? 'Document Presets' : language === 'fr' ? 'Configuration du Document' : 'إعدادات المستند'}
-                  </h3>
-                </div>
+                    {language === 'en' ? '1 · Document' : language === 'fr' ? '1 · Document' : '1 · المستند'}
+                    <span className="ml-auto font-mono text-[10px] font-semibold text-slate-400">
+                      {docType === 'invoice' ? 'FAC' : docType === 'voucher' ? 'BON' : 'REC'} · {docItems.length} {language === 'en' ? 'lines' : language === 'fr' ? 'lignes' : 'بنود'} · {docTotal.toLocaleString()} {project.currency}
+                    </span>
+                  </span>
+                </summary>
 
-                <div className="flex-1 space-y-3 p-4">
+                <div className="flex-1 space-y-3 border-t border-slate-100 p-4 dark:border-slate-850">
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1.5">
                       {language === 'en' ? 'Document type' : language === 'fr' ? 'Type de pièce' : 'نوع المستند'}
@@ -3476,7 +4073,7 @@ export default function ProjectDetail({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <div>
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
                         {language === 'en' ? 'Document #' : language === 'fr' ? 'N° Document' : 'رقم المستند'}
@@ -3507,11 +4104,36 @@ export default function ProjectDetail({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <div>
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        Logo (PNG)
+                        {language === 'en' ? 'Issue date' : language === 'fr' ? 'Date d’émission' : 'تاريخ الإصدار'}
                       </label>
+                      <input
+                        type="date"
+                        value={docDate}
+                        onChange={(e) => e.target.value && setDocDate(e.target.value)}
+                        className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                        {language === 'en' ? 'Due date' : language === 'fr' ? 'Échéance' : 'تاريخ الاستحقاق'}
+                      </label>
+                      <input
+                        type="date"
+                        value={docDueDate}
+                        onChange={(e) => e.target.value && setDocDueDate(e.target.value)}
+                        className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                      Logo (PNG)
+                    </label>
+                    <div className="flex items-center gap-2">
                       <input
                         type="file"
                         accept="image/png"
@@ -3519,133 +4141,156 @@ export default function ProjectDetail({
                           const file = e.target.files?.[0];
                           if (file) {
                              const reader = new FileReader();
-                             reader.onloadend = () => setDocLogo(reader.result as string);
+                             reader.onloadend = () => {
+                               const dataUrl = reader.result as string;
+                               setDocLogo(dataUrl);
+                               try { localStorage.setItem(docLogoStorageKey, dataUrl); } catch { /* storage full */ }
+                             };
                              reader.readAsDataURL(file);
                           }
                         }}
                         className="w-full text-[10px] file:text-[10px] file:py-1 file:px-2 file:rounded file:border-0 file:bg-slate-100 dark:file:bg-slate-800 file:text-slate-700 dark:file:text-slate-300"
                       />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        Format
-                      </label>
-                      <div className="flex h-[30px] items-center rounded-lg border border-slate-200 bg-slate-50 px-2 text-xs font-mono font-semibold text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300">
-                        A4
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="pt-2 border-t border-slate-100 dark:border-slate-850 space-y-3">
-                    <h4 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">
-                      {language === 'en' ? 'Billing parties' : language === 'fr' ? 'Parties' : 'أطراف الفوترة'}
-                    </h4>
-
-                    <DocumentPartySelector
-                      language={language}
-                      role="issuer"
-                      accentClass="text-sky-600 dark:text-sky-400"
-                      title={
-                        language === 'en'
-                          ? 'Issuer'
-                          : language === 'fr'
-                            ? 'Émetteur'
-                            : 'الجهة المصدرة'
-                      }
-                      fields={{
-                        name: docSenderName,
-                        email: docSenderEmail,
-                        phone: docSenderPhone,
-                        address: docSenderAddress,
-                      }}
-                      onChange={(patch) => {
-                        if (patch.name !== undefined) setDocSenderName(patch.name);
-                        if (patch.email !== undefined) setDocSenderEmail(patch.email);
-                        if (patch.phone !== undefined) setDocSenderPhone(patch.phone);
-                        if (patch.address !== undefined) setDocSenderAddress(patch.address);
-                      }}
-                      savedParties={documentParties}
-                      onSelectParty={handleSelectDocumentParty}
-                      onSaveParty={(label) => handleSaveDocumentParty('issuer', label)}
-                      onDeleteParty={handleDeleteDocumentParty}
-                    />
-
-                    <DocumentPartySelector
-                      language={language}
-                      role="recipient"
-                      accentClass="text-purple-600 dark:text-purple-400"
-                      title={
-                        language === 'en'
-                          ? 'Recipient'
-                          : language === 'fr'
-                            ? 'Destinataire'
-                            : 'المستلم'
-                      }
-                      fields={{
-                        name: docClientName,
-                        email: docClientEmail,
-                        phone: docClientPhone,
-                        address: docClientAddress,
-                      }}
-                      onChange={(patch) => {
-                        if (patch.name !== undefined) setDocClientName(patch.name);
-                        if (patch.email !== undefined) setDocClientEmail(patch.email);
-                        if (patch.phone !== undefined) setDocClientPhone(patch.phone);
-                        if (patch.address !== undefined) setDocClientAddress(patch.address);
-                      }}
-                      savedParties={documentParties}
-                      onSelectParty={handleSelectDocumentParty}
-                      onSaveParty={(label) => handleSaveDocumentParty('recipient', label)}
-                      onDeleteParty={handleDeleteDocumentParty}
-                      recipientKind={docRecipientKind}
-                      onRecipientKindChange={setDocRecipientKind}
-                      quickFillOptions={recipientQuickFill}
-                    />
-
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                        {language === 'en' ? 'Footer notes' : language === 'fr' ? 'Notes de pied' : 'ملاحظات التذييل'}
-                      </label>
-                      <textarea
-                        rows={2}
-                        value={docNotes}
-                        onChange={(e) => {
-                          setDocNotes(e.target.value);
-                          persistCurrentDocPreset({ defaultNotes: e.target.value });
-                        }}
-                        placeholder={
-                          language === 'en'
-                            ? 'Payment terms, bank details…'
-                            : language === 'fr'
-                              ? 'Conditions, coordonnées bancaires…'
-                              : 'شروط الدفع، تفاصيل البنك…'
-                        }
-                        className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none resize-none"
-                      />
+                      {docLogo && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDocLogo(null);
+                            try { localStorage.removeItem(docLogoStorageKey); } catch { /* noop */ }
+                          }}
+                          className="shrink-0 rounded-md px-2 py-1 text-[10px] font-bold text-slate-400 hover:bg-slate-100 hover:text-rose-600 dark:hover:bg-slate-800"
+                        >
+                          {language === 'en' ? 'Clear' : language === 'fr' ? 'Effacer' : 'مسح'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
+              </details>
+
+              {/* Step 3 — Parties & notes */}
+              <details className="ux-details bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm min-w-0">
+                <summary className="px-4 py-3 list-none [&::-webkit-details-marker]:hidden">
+                  <span className="flex items-center gap-2 font-bold text-xs text-slate-900 dark:text-white">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/10 text-purple-600 dark:text-purple-400">
+                      <UserIcon className="w-3.5 h-3.5" />
+                    </span>
+                    {language === 'en' ? '3 · Parties & notes' : language === 'fr' ? '3 · Parties & notes' : '3 · الأطراف والملاحظات'}
+                    <span className="ml-auto truncate font-mono text-[10px] font-semibold text-slate-400">
+                      {(docSenderName || (language === 'en' ? 'Issuer…' : 'Émetteur…'))} → {(docClientName || (language === 'en' ? 'Recipient…' : 'Destinataire…'))}
+                    </span>
+                  </span>
+                </summary>
+                <div className="space-y-3 border-t border-slate-100 p-4 dark:border-slate-850">
+                  <DocumentPartySelector
+                    language={language}
+                    role="issuer"
+                    accentClass="text-sky-600 dark:text-sky-400"
+                    title={
+                      language === 'en'
+                        ? 'Issuer'
+                        : language === 'fr'
+                          ? 'Émetteur'
+                          : 'الجهة المصدرة'
+                    }
+                    fields={{
+                      name: docSenderName,
+                      email: docSenderEmail,
+                      phone: docSenderPhone,
+                      address: docSenderAddress,
+                    }}
+                    onChange={(patch) => {
+                      if (patch.name !== undefined) setDocSenderName(patch.name);
+                      if (patch.email !== undefined) setDocSenderEmail(patch.email);
+                      if (patch.phone !== undefined) setDocSenderPhone(patch.phone);
+                      if (patch.address !== undefined) setDocSenderAddress(patch.address);
+                    }}
+                    savedParties={documentParties}
+                    onSelectParty={handleSelectDocumentParty}
+                    onSaveParty={(label) => handleSaveDocumentParty('issuer', label)}
+                    onDeleteParty={handleDeleteDocumentParty}
+                  />
+
+                  <DocumentPartySelector
+                    language={language}
+                    role="recipient"
+                    accentClass="text-purple-600 dark:text-purple-400"
+                    title={
+                      language === 'en'
+                        ? 'Recipient'
+                        : language === 'fr'
+                          ? 'Destinataire'
+                          : 'المستلم'
+                    }
+                    fields={{
+                      name: docClientName,
+                      email: docClientEmail,
+                      phone: docClientPhone,
+                      address: docClientAddress,
+                    }}
+                    onChange={(patch) => {
+                      if (patch.name !== undefined) setDocClientName(patch.name);
+                      if (patch.email !== undefined) setDocClientEmail(patch.email);
+                      if (patch.phone !== undefined) setDocClientPhone(patch.phone);
+                      if (patch.address !== undefined) setDocClientAddress(patch.address);
+                    }}
+                    savedParties={documentParties}
+                    onSelectParty={handleSelectDocumentParty}
+                    onSaveParty={(label) => handleSaveDocumentParty('recipient', label)}
+                    onDeleteParty={handleDeleteDocumentParty}
+                    recipientKind={docRecipientKind}
+                    onRecipientKindChange={setDocRecipientKind}
+                    quickFillOptions={recipientQuickFill}
+                  />
+
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                      {language === 'en' ? 'Footer notes' : language === 'fr' ? 'Notes de pied' : 'ملاحظات التذييل'}
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={docNotes}
+                      onChange={(e) => {
+                        setDocNotes(e.target.value);
+                        persistCurrentDocPreset({ defaultNotes: e.target.value });
+                      }}
+                      placeholder={
+                        language === 'en'
+                          ? 'Payment terms, bank details…'
+                          : language === 'fr'
+                            ? 'Conditions, coordonnées bancaires…'
+                            : 'شروط الدفع، تفاصيل البنك…'
+                      }
+                      className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none resize-none"
+                    />
+                  </div>
+                </div>
+              </details>
+
               </div>
 
-              {/* Import Registered Expenses */}
-              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm flex flex-col min-h-0 min-w-0">
-                <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-850 shrink-0 bg-slate-50/70 dark:bg-slate-950/30">
-                  <h3 className="font-bold text-xs text-slate-900 dark:text-white flex items-center gap-2">
+              {/* Step 2 — Content: import expenses, tune lines, add custom rows */}
+              <details open className="ux-details bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm min-w-0">
+                <summary className="px-4 py-3 list-none [&::-webkit-details-marker]:hidden">
+                  <span className="flex items-center gap-2 font-bold text-xs text-slate-900 dark:text-white">
                     <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                       <CreditCard className="w-3.5 h-3.5" />
                     </span>
-                    {language === 'en' ? 'Import Expenses' : language === 'fr' ? 'Importer des Frais' : 'استيراد المصاريف'}
-                  </h3>
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">
+                    {language === 'en' ? '2 · Content' : language === 'fr' ? '2 · Contenu' : '2 · المحتوى'}
+                    <span className="ml-auto font-mono text-[10px] font-semibold text-slate-400">
+                      {docItems.length} {language === 'en' ? 'lines' : language === 'fr' ? 'lignes' : 'بنود'}
+                    </span>
+                  </span>
+                </summary>
+                <div className="space-y-3 border-t border-slate-100 p-4 dark:border-slate-850">
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-snug">
                     {language === 'en'
-                      ? 'Tap expenses to add them as line items on the document.'
+                      ? 'Tap expenses to add them as line items, tune margins below, or add a custom row.'
                       : language === 'fr'
-                        ? 'Sélectionnez des frais pour les ajouter au document.'
-                        : 'اضغط على المصاريف لإضافتها كبنود في المستند.'}
+                        ? 'Sélectionnez des frais, ajustez les marges, ou ajoutez une ligne manuelle.'
+                        : 'اضغط على المصاريف لإضافتها، اضبط العمولات، أو أضف بندًا يدويًا.'}
                   </p>
-                </div>
-
-                <div className="min-h-[10rem] max-h-[34rem] flex-1 overflow-y-auto p-3">
+                  <div className="max-h-80 overflow-y-auto rounded-lg border border-slate-100 p-2 dark:border-slate-850">
                 {project.expenses.length === 0 ? (
                   <div className="h-full min-h-[8rem] flex items-center justify-center border border-dashed border-slate-200 dark:border-slate-800 rounded-lg text-center text-[11px] text-slate-400 px-3">
                     {language === 'en' ? 'No expenses in this project yet.' : language === 'fr' ? 'Aucun frais dans ce projet.' : 'لا توجد مصاريف في هذا المشروع.'}
@@ -3701,29 +4346,10 @@ export default function ProjectDetail({
                             })()}
                           </span>
                           </div>
-                          {importedItem && (
-                            <label
-                              className="mt-2 flex items-center justify-between gap-2 border-t border-emerald-500/20 pt-2"
-                              onClick={(event) => event.stopPropagation()}
-                              onKeyDown={(event) => event.stopPropagation()}
-                            >
-                              <span className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
-                                {language === 'en' ? 'Invoice margin' : language === 'fr' ? 'Marge facture' : 'عمولة الفاتورة'}
-                              </span>
-                              <span className="relative w-20">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={importedItem.commissionPercent || ''}
-                                  placeholder="0"
-                                  aria-label={language === 'en' ? `Invoice margin for ${exp.title}` : language === 'fr' ? `Marge facture pour ${exp.title}` : `عمولة الفاتورة لـ ${exp.title}`}
-                                  onChange={(event) => updateDocumentItemCommission(importedItem.id, Number(event.target.value))}
-                                  className="w-full rounded-md border border-emerald-500/40 bg-white px-2 py-1 pr-4 text-right font-mono text-[11px] text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500 dark:bg-slate-900 dark:text-white"
-                                />
-                                <span className="pointer-events-none absolute right-1.5 top-1 text-[10px] text-slate-400">%</span>
-                              </span>
-                            </label>
+                          {isChecked && (
+                            <p className="mt-1.5 border-t border-emerald-500/20 pt-1.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                              {language === 'en' ? 'Added — tune margin below' : language === 'fr' ? 'Ajouté — marge ci-dessous' : 'تمت الإضافة — العمولة بالأسفل'}
+                            </p>
                           )}
                         </div>
                       );
@@ -3731,23 +4357,17 @@ export default function ProjectDetail({
                   </div>
                 )}
                 </div>
-              </div>
-
-              </div>
 
               {docItems.some((item) => item.sourceExpenseId) && (
-                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm px-4 py-3">
-                  <div className="mb-2.5 flex items-center justify-between gap-3">
-                    <h3 className="text-xs font-bold text-slate-900 dark:text-white">
-                      {language === 'en' ? 'Invoice line settings' : language === 'fr' ? 'Réglages des lignes' : 'إعدادات بنود الفاتورة'}
-                    </h3>
-                    <span className="text-[10px] text-slate-400">
-                      {language === 'en' ? 'Invoice only' : language === 'fr' ? 'Facture uniquement' : 'للفاتورة فقط'}
-                    </span>
+                <div>
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      {language === 'en' ? 'Imported lines — description & margin' : language === 'fr' ? 'Lignes importées — description & marge' : 'البنود المستوردة — الوصف والعمولة'}
+                    </h4>
                   </div>
                   <div className="space-y-2">
                     {docItems.filter((item) => item.sourceExpenseId).map((item) => (
-                      <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_4.5rem] gap-2 rounded-lg border border-slate-100 bg-slate-50/70 p-2 dark:border-slate-850 dark:bg-slate-950/40 sm:grid-cols-[minmax(0,1fr)_4.5rem_5.5rem]">
+                      <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_4.5rem_2rem] items-end gap-2 rounded-lg border border-slate-100 bg-slate-50/70 p-2 dark:border-slate-850 dark:bg-slate-950/40 sm:grid-cols-[minmax(0,1fr)_4.5rem_5.5rem_2rem]">
                         <input
                           type="text"
                           value={item.description}
@@ -3774,6 +4394,15 @@ export default function ProjectDetail({
                           <span className="text-slate-400 sm:block">{language === 'en' ? 'Invoice price' : language === 'fr' ? 'Prix facturé' : 'سعر الفاتورة'}</span>
                           <span className="font-mono font-bold text-slate-800 dark:text-slate-100">{item.unitPrice.toLocaleString()} {project.currency}</span>
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveDocItem(item.id)}
+                          title={language === 'en' ? 'Remove line' : language === 'fr' ? 'Retirer la ligne' : 'إزالة البند'}
+                          aria-label={language === 'en' ? 'Remove line' : language === 'fr' ? 'Retirer la ligne' : 'إزالة البند'}
+                          className="flex h-8 w-8 items-center justify-center justify-self-end rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30 sm:col-span-1"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -3781,7 +4410,26 @@ export default function ProjectDetail({
               )}
 
               {/* Row 2: Compact manual line item */}
-              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm px-4 py-3">
+              <div>
+                {docItems.some((item) => !item.sourceExpenseId) && (
+                  <div className="mb-2 space-y-1.5">
+                    {docItems.filter((item) => !item.sourceExpenseId).map((item) => (
+                      <div key={item.id} className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/70 px-2 py-1.5 dark:border-slate-850 dark:bg-slate-950/40">
+                        <span className="min-w-0 flex-1 truncate text-xs text-slate-700 dark:text-slate-200">{item.description || '—'}</span>
+                        <span className="shrink-0 font-mono text-[11px] font-bold text-slate-700 dark:text-slate-200">{item.quantity} × {item.unitPrice.toLocaleString()}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveDocItem(item.id)}
+                          title={language === 'en' ? 'Remove line' : language === 'fr' ? 'Retirer la ligne' : 'إزالة البند'}
+                          aria-label={language === 'en' ? 'Remove line' : language === 'fr' ? 'Retirer la ligne' : 'إزالة البند'}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
@@ -3844,7 +4492,9 @@ export default function ProjectDetail({
                     </button>
                   </div>
                 </form>
-              </div>
+                </div>
+                </div>
+              </details>
 
             </div>
 
@@ -3871,23 +4521,56 @@ export default function ProjectDetail({
                 
                 <div className="flex flex-col gap-2 sm:items-end">
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      disabled={docSaving || docItems.length === 0}
-                      onClick={() => {
-                        saveCurrentCivilDocument('draft').catch((error) => {
-                          showAlert(
-                            language === 'fr' ? 'Document non enregistre' : 'Document not saved',
-                            error instanceof Error ? error.message : 'Could not save this document.',
-                            'danger',
-                          );
-                        });
-                      }}
-                      className="flex items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
-                    >
-                      {docSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                      <span>{language === 'fr' ? 'Enregistrer' : 'Save draft'}</span>
-                    </button>
+                    {(() => {
+                      const current = activeCivilDocumentId
+                        ? savedCivilDocuments.find((item) => item.id === activeCivilDocumentId)
+                        : undefined;
+                      return (
+                        <>
+                          {current && (
+                            <span className={`rounded-full px-2 py-1 text-[9px] font-bold uppercase ${current.status === 'paid' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300' : current.status === 'finalized' ? 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300' : current.status === 'cancelled' ? 'bg-slate-200 text-slate-500 dark:bg-slate-800 dark:text-slate-400' : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'}`}>
+                              {current.status === 'draft' ? (language === 'en' ? 'Draft' : language === 'fr' ? 'Brouillon' : 'مسودة') : current.status === 'finalized' ? (language === 'en' ? 'Finalized' : language === 'fr' ? 'Finalisé' : 'نهائي') : current.status === 'paid' ? (language === 'en' ? 'Paid' : language === 'fr' ? 'Payé' : 'مدفوع') : (language === 'en' ? 'Cancelled' : language === 'fr' ? 'Annulé' : 'ملغي')}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            disabled={docSaving || docItems.length === 0}
+                            onClick={() => {
+                              saveCurrentCivilDocument('draft').catch((error) => {
+                                showAlert(
+                                  language === 'fr' ? 'Document non enregistre' : 'Document not saved',
+                                  error instanceof Error ? error.message : 'Could not save this document.',
+                                  'danger',
+                                );
+                              });
+                            }}
+                            className="flex items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+                          >
+                            {docSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                            <span>{language === 'fr' ? 'Enregistrer' : 'Save draft'}</span>
+                          </button>
+                          {current?.status === 'finalized' && (
+                            <button
+                              type="button"
+                              disabled={docSaving}
+                              onClick={() => {
+                                saveCurrentCivilDocument('paid').catch((error) => {
+                                  showAlert(
+                                    language === 'fr' ? 'Document non enregistre' : 'Document not saved',
+                                    error instanceof Error ? error.message : 'Could not save this document.',
+                                    'danger',
+                                  );
+                                });
+                              }}
+                              className="flex items-center justify-center gap-1.5 rounded-md bg-emerald-600 px-3 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 shrink-0"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span>{language === 'en' ? 'Mark paid' : language === 'fr' ? 'Marquer payé' : 'تعليم كمدفوع'}</span>
+                            </button>
+                          )}
+                        </>
+                      );
+                    })()}
                     <button
                       type="button"
                       disabled={docSaving || docItems.length === 0}
@@ -4016,17 +4699,7 @@ export default function ProjectDetail({
                             return (
                               <tr key={item.id || index} className="text-xs">
                                 <td className="py-3 font-sans font-medium text-slate-800 pr-3">
-                                  <div className="flex justify-between items-start">
-                                    <span>{item.description}</span>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleRemoveDocItem(item.id)}
-                                      className="text-red-400 hover:text-red-650 opacity-0 group-hover:opacity-100 hover:bg-red-50 p-0.5 rounded ml-1.5 transition-all text-[9px] print:hidden cursor-pointer"
-                                      title="Remove item"
-                                    >
-                                      Remove
-                                    </button>
-                                  </div>
+                                  <span>{item.description}</span>
                                 </td>
                                 {docVisibleColumns.includes('quantity') && (
                                   <td className="py-3 text-center font-mono text-slate-600">{item.quantity}</td>
@@ -4147,7 +4820,7 @@ export default function ProjectDetail({
 
           {/* Revenue Summary */}
           {project.rentalBookings && project.rentalBookings.length > 0 && (
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:grid-cols-6">
               <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
                 <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">{t.rental.totalRevenue}</p>
                 <p className="text-lg font-bold text-slate-900 dark:text-white mt-1">
@@ -4235,8 +4908,21 @@ export default function ProjectDetail({
             project={project}
             language={language}
             canManage={perm.canModifySettings}
+            readOnlyReason={
+              language === 'en'
+                ? 'You have read-only access here. Owners and managers can record funding, change orders, purchase orders, site logs and budget commitments.'
+                : language === 'fr'
+                  ? 'Votre accès est en lecture seule. Les propriétaires et gestionnaires peuvent enregistrer financements, avenants, bons de commande, journal et prévisions.'
+                  : 'صلاحيتك للقراءة فقط. يمكن للمالكين والمديرين تسجيل التمويل وأوامر التغيير وأوامر الشراء وسجل الورشة وتوقعات الميزانية.'
+            }
             onSave={syncProjectChanges}
             onRequestConfirm={requestConfirm}
+            onRecordDecision={({ actionType, details, targetTitle }) =>
+              trackActivity(actionType, details, {
+                targetType: 'project',
+                targetTitle,
+              })
+            }
           />
         </FadeIn>
       )}
@@ -4283,6 +4969,11 @@ export default function ProjectDetail({
             </div>
 
             <form onSubmit={handleExpenseSubmit} className="space-y-3.5 mt-3.5">
+              {expenseFormError && (
+                <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+                  {formErrorText(expenseFormError, language)}
+                </p>
+              )}
               <div>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Expense Title *' : language === 'fr' ? 'Titre *' : 'عنوان المصروف *'}</label>
                 <input
@@ -4290,12 +4981,12 @@ export default function ProjectDetail({
                   required
                   placeholder={language === 'en' ? "e.g. Carrara Tile Marble Slabs" : language === 'fr' ? "ex. Dalles de marbre de Carrare" : "مثل: ألواح رخام كارارا"}
                   value={expenseTitle}
-                  onChange={(e) => setExpenseTitle(e.target.value)}
+                  onChange={(e) => { setExpenseTitle(e.target.value); setExpenseFormError(null); }}
                   className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Sourced Cost Amount *' : language === 'fr' ? 'Montant *' : 'قيمة المبلغ المدفوع *'}</label>
                   <input
@@ -4304,7 +4995,7 @@ export default function ProjectDetail({
                     min={0.01}
                     step="any"
                     value={expenseAmount}
-                    onChange={(e) => setExpenseAmount(Number(e.target.value))}
+                    onChange={(e) => { setExpenseAmount(Number(e.target.value)); setExpenseFormError(null); }}
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none font-mono font-semibold"
                   />
                 </div>
@@ -4317,7 +5008,10 @@ export default function ProjectDetail({
                       max={100}
                       step="any"
                       value={expenseCommission}
-                      onChange={(e) => setExpenseCommission(Number(e.target.value))}
+                      onChange={(e) => {
+                        setExpenseCommission(clampCommission(Number(e.target.value)));
+                        setExpenseFormError(null);
+                      }}
                       className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none font-mono font-semibold"
                     />
                     {expenseCommission > 0 && expenseAmount > 0 && (
@@ -4328,7 +5022,7 @@ export default function ProjectDetail({
                   </div>
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Date' : language === 'fr' ? 'Date' : 'التاريخ'}</label>
                   <input
@@ -4401,7 +5095,7 @@ export default function ProjectDetail({
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Paid By Partner' : language === 'fr' ? 'Payé par' : 'الشخص الذي دفع المبلغ'}</label>
                   <select
@@ -4448,71 +5142,70 @@ export default function ProjectDetail({
                 />
               </div>
 
-              {editingExpenseId && !expenseReceiptDraft && !removeExpenseReceipt && (() => {
-                const existingReceipt = project.expenses.find((ex) => ex.id === editingExpenseId)?.receiptFiles?.[0];
-                if (!existingReceipt) return null;
+              {editingExpenseId && expenseReceiptDrafts.length === 0 && (() => {
+                const savedReceipts = (project.expenses.find((ex) => ex.id === editingExpenseId)?.receiptFiles || [])
+                  .filter((media) => !receiptsToRemove.includes(media.id));
+                const removedCount = (project.expenses.find((ex) => ex.id === editingExpenseId)?.receiptFiles || [])
+                  .filter((media) => receiptsToRemove.includes(media.id)).length;
+                if (savedReceipts.length === 0 && removedCount === 0) return null;
                 return (
                   <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-2.5 bg-slate-50 dark:bg-slate-950">
                     <div className="mb-2 flex items-center justify-between gap-2">
                       <p className="text-[10px] font-bold uppercase tracking-wider text-slate-450">
-                        {language === 'en' ? 'Current receipt' : language === 'fr' ? 'Bon actuel' : 'الوصل الحالي'}
+                        {language === 'en' ? 'Saved receipts' : language === 'fr' ? 'Bons enregistrés' : 'الوصولات المحفوظة'}
+                        <span className="ml-1.5 rounded-full bg-slate-200 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {savedReceipts.length}
+                        </span>
                       </p>
-                      <button
-                        type="button"
-                        disabled={expenseSaving}
-                        onClick={() => requestConfirm({
-                          title: language === 'en'
-                            ? 'Remove receipt?'
-                            : language === 'fr'
-                              ? 'Supprimer le reçu ?'
-                              : 'حذف الوصل؟',
-                          message: language === 'en'
-                            ? 'Remove this supplier receipt from the expense when the changes are saved?'
-                            : language === 'fr'
-                              ? 'Supprimer ce reçu fournisseur de la dépense lors de l’enregistrement ?'
-                              : 'حذف وصل المورد من المصروف عند حفظ التغييرات؟',
-                          confirmLabel: language === 'en'
-                            ? 'Remove receipt'
-                            : language === 'fr'
-                              ? 'Supprimer le reçu'
-                              : 'حذف الوصل',
-                          onConfirm: () => setRemoveExpenseReceipt(true),
-                        })}
-                        className="text-[10px] font-semibold text-red-600 hover:underline disabled:opacity-50 dark:text-red-400"
-                      >
-                        {language === 'en' ? 'Remove' : language === 'fr' ? 'Supprimer' : 'حذف'}
-                      </button>
+                      {removedCount > 0 && (
+                        <button
+                          type="button"
+                          disabled={expenseSaving}
+                          onClick={() => setReceiptsToRemove([])}
+                          className="text-[10px] font-semibold text-sky-600 hover:underline disabled:opacity-50 dark:text-sky-400"
+                        >
+                          {language === 'en' ? `Undo removal (${removedCount})` : language === 'fr' ? 'Annuler le retrait' : 'تراجع عن الحذف'}
+                        </button>
+                      )}
                     </div>
-                    <ExpenseReceiptThumb
-                      media={existingReceipt}
-                      label={language === 'en' ? 'Supplier receipt' : language === 'fr' ? 'Bon fournisseur' : 'وصل المورد'}
-                    />
+                    <div className="flex flex-wrap gap-2">
+                      {savedReceipts.map((media) => (
+                        <div key={media.id} className="relative">
+                          <ExpenseReceiptThumb
+                            media={media}
+                            gallery={savedReceipts}
+                            label={language === 'en' ? 'Supplier receipt' : language === 'fr' ? 'Bon fournisseur' : 'وصل المورد'}
+                          />
+                          <button
+                            type="button"
+                            disabled={expenseSaving}
+                            onClick={() => setReceiptsToRemove((ids) => [...ids, media.id])}
+                            aria-label={language === 'en' ? 'Remove receipt on save' : language === 'fr' ? 'Retirer ce bon à l’enregistrement' : 'إزالة هذا الوصل عند الحفظ'}
+                            title={language === 'en' ? 'Remove on save' : language === 'fr' ? 'Retirer à l’enregistrement' : 'إزالة عند الحفظ'}
+                            className="absolute -right-1.5 -top-1.5 flex h-4.5 w-4.5 items-center justify-center rounded-full bg-white text-red-500 shadow ring-1 ring-slate-200 hover:bg-red-50 disabled:opacity-50 dark:bg-slate-900 dark:ring-slate-700"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    {removedCount > 0 && (
+                      <p className="mt-2 text-[10px] text-amber-700 dark:text-amber-400">
+                        {language === 'en'
+                          ? `${removedCount} receipt${removedCount > 1 ? 's' : ''} will be removed when you save.`
+                          : language === 'fr'
+                            ? `${removedCount} bon(s) seront supprimés à l’enregistrement.`
+                            : `سيتم حذف ${removedCount} من الوصولات عند الحفظ.`}
+                      </p>
+                    )}
                   </div>
                 );
               })()}
 
-              {removeExpenseReceipt && !expenseReceiptDraft && (
-                <p className="text-[10px] text-amber-700 dark:text-amber-400">
-                  {language === 'en'
-                    ? 'Receipt will be removed when you save.'
-                    : language === 'fr'
-                      ? 'Le bon sera supprimé à l’enregistrement.'
-                      : 'سيُحذف الوصل عند الحفظ.'}
-                  {' '}
-                  <button
-                    type="button"
-                    className="font-semibold underline"
-                    onClick={() => setRemoveExpenseReceipt(false)}
-                  >
-                    {language === 'en' ? 'Undo' : language === 'fr' ? 'Annuler' : 'تراجع'}
-                  </button>
-                </p>
-              )}
-
               <ExpenseReceiptField
                 language={language}
-                value={expenseReceiptDraft}
-                onChange={setExpenseReceiptDraft}
+                value={expenseReceiptDrafts}
+                onChange={setExpenseReceiptDrafts}
                 onRequestConfirm={requestConfirm}
                 disabled={expenseSaving}
               />
@@ -4578,13 +5271,29 @@ export default function ProjectDetail({
               </button>
             </div>
             <form onSubmit={handleReimbursementSubmit} className="space-y-3 mt-3.5">
+              {reimbFormError && (
+                <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+                  {formErrorText(reimbFormError, language)}
+                </p>
+              )}
               <div>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">
                   {language === 'en' ? 'From' : language === 'fr' ? 'De' : 'من'}
                 </label>
                 <select
                   value={reimbFrom}
-                  onChange={(e) => setReimbFrom(e.target.value)}
+                  onChange={(e) => {
+                    const nextFrom = e.target.value;
+                    setReimbFrom(nextFrom);
+                    setReimbFormError(null);
+                    // Keep the two parties distinct when the payer changes.
+                    if (nextFrom === reimbTo) {
+                      const fallback = project.members.find(
+                        (m) => (m.status === 'accepted' || !m.status) && m.email !== nextFrom
+                      );
+                      if (fallback) setReimbTo(fallback.email);
+                    }
+                  }}
                   className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950"
                   required
                 >
@@ -4599,13 +5308,16 @@ export default function ProjectDetail({
                 </label>
                 <select
                   value={reimbTo}
-                  onChange={(e) => setReimbTo(e.target.value)}
+                  onChange={(e) => { setReimbTo(e.target.value); setReimbFormError(null); }}
                   className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950"
                   required
                 >
-                  {project.members.filter((m) => m.status === 'accepted' || !m.status).map((m) => (
-                    <option key={m.email} value={m.email}>{m.name}</option>
-                  ))}
+                  {project.members
+                    .filter((m) => m.status === 'accepted' || !m.status)
+                    .filter((m) => m.email !== reimbFrom)
+                    .map((m) => (
+                      <option key={m.email} value={m.email}>{m.name}</option>
+                    ))}
                 </select>
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -4619,7 +5331,7 @@ export default function ProjectDetail({
                     step="any"
                     required
                     value={reimbAmount}
-                    onChange={(e) => setReimbAmount(Number(e.target.value))}
+                    onChange={(e) => { setReimbAmount(Number(e.target.value)); setReimbFormError(null); }}
                     className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 font-mono"
                   />
                 </div>
@@ -4679,6 +5391,11 @@ export default function ProjectDetail({
             </div>
 
             <form onSubmit={handleAddTaskSubmit} className="space-y-3.5 mt-3.5">
+              {taskFormError && (
+                <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+                  {formErrorText(taskFormError, language)}
+                </p>
+              )}
               <div>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Task Title *' : language === 'fr' ? 'Titre *' : 'اسم المهمة *'}</label>
                 <input
@@ -4686,7 +5403,7 @@ export default function ProjectDetail({
                   required
                   placeholder={language === 'en' ? "Verify wall framing dimensions" : language === 'fr' ? "Vérifier les dimensions des cadres muraux" : "التحقق من أبعاد هيكل الحائط"}
                   value={taskTitle}
-                  onChange={(e) => setTaskTitle(e.target.value)}
+                  onChange={(e) => { setTaskTitle(e.target.value); setTaskFormError(null); }}
                   className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-slate-900 dark:text-white focus:outline-none"
                 />
               </div>
@@ -4702,7 +5419,7 @@ export default function ProjectDetail({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-450 mb-1">{language === 'en' ? 'Assign Partner' : language === 'fr' ? 'Assigné à' : 'تعيين شريك'}</label>
                   <select
@@ -4798,7 +5515,7 @@ export default function ProjectDetail({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{language === 'en' ? 'Client Name' : language === 'fr' ? 'Nom du client' : 'اسم الزبون / صاحب الورشة'}</label>
                   <input
@@ -4824,7 +5541,7 @@ export default function ProjectDetail({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">{language === 'en' ? 'Project Type' : language === 'fr' ? 'Type de Projet' : 'نوع المشروع'}</label>
                   <select
@@ -5944,7 +6661,7 @@ function RentalBookingEditor({
   };
 
   return (
-    <div className="mt-3 grid grid-cols-2 gap-2 rounded-lg border border-purple-200 bg-purple-50/50 p-3 dark:border-purple-900/60 dark:bg-purple-950/20 sm:grid-cols-4">
+    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 rounded-lg border border-purple-200 bg-purple-50/50 p-3 dark:border-purple-900/60 dark:bg-purple-950/20 sm:grid-cols-4">
       <label className="col-span-2"><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Guest', 'Client')}</span><input value={draft.clientName} onChange={(event) => setDraft({ ...draft, clientName: event.target.value })} className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-800 dark:bg-slate-950" /></label>
       <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Check-in', 'Arrivée')}</span><DatePickerInput value={draft.checkIn} onChange={(value) => setDraft({ ...draft, checkIn: value })} ariaLabel={rentalText(language, 'Check-in', 'Arrivée')} inputClassName="h-8 text-[10px]" /></label>
       <label><span className="mb-1 block text-[9px] font-bold uppercase text-slate-500">{rentalText(language, 'Check-out', 'Départ')}</span><DatePickerInput value={draft.checkOut} min={draft.checkIn || undefined} onChange={(value) => setDraft({ ...draft, checkOut: value })} ariaLabel={rentalText(language, 'Check-out', 'Départ')} inputClassName="h-8 text-[10px]" /></label>

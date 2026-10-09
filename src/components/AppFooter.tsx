@@ -49,7 +49,7 @@ export function AppFooter({ language, variant = 'default' }: AppFooterProps) {
     >
       <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 text-center sm:flex-row sm:gap-4 sm:text-start">
         <div className="flex items-center gap-2.5">
-          <HSLogo className="h-7 w-7 shrink-0" compact />
+          <HSLogo className="h-7 w-auto shrink-0" compact />
           <div className="min-w-0 text-start">
             <p className="text-xs font-bold tracking-tight text-slate-800 dark:text-slate-100">
               HS Tracker

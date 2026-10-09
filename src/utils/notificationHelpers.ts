@@ -1,4 +1,5 @@
 import { AppNotification, NotificationCategory, Project } from '../types';
+import { taskOwnerEmail } from './taskState';
 
 /** Only these categories surface in the bell — no noise */
 export const IMPORTANT_NOTIFICATION_CATEGORIES = new Set<NotificationCategory>([
@@ -59,7 +60,7 @@ export async function syncTaskDeadlineReminders(
 
     for (const task of project.tasks) {
       if (task.status === 'completed') continue;
-      if ((task.assignedTo || '').toLowerCase() !== email) continue;
+      if (taskOwnerEmail(task).toLowerCase() !== email) continue;
 
       const deadline = parseDeadline(task.deadline);
       if (!deadline) continue;

@@ -1,21 +1,18 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Home, 
-  Plus, 
-  Folder, 
-  Search, 
-  Globe, 
-  Sun, 
-  Moon, 
-  Users, 
+import {
+  Home,
+  Plus,
+  Folder,
+  Search,
+  Globe,
+  Sun,
+  Moon,
   X,
   FileText,
   Sliders,
   LogOut,
-  Building,
-  KeyRound,
   TrendingUp,
   Calendar,
   Image,
@@ -44,7 +41,7 @@ import { appDateKey, appDateKeyAfterDays } from './utils/dateTime';
 const Dashboard = lazy(() => import('./components/Dashboard'));
 const ProjectDetail = lazy(() => import('./components/ProjectDetail'));
 const RentalDashboard = lazy(() => import('./components/RentalDashboard'));
-const OperationsDirectory = lazy(() => import('./components/OperationsDirectory'));
+const GlobalSearch = lazy(() => import('./components/GlobalSearch'));
 const AIAssistantPanel = lazy(() => import('./components/AIAssistantPanel'));
 
 const SIDEBAR_TRANSLATIONS = {
@@ -130,13 +127,11 @@ const SIDEBAR_TRANSLATIONS = {
 
 const WORKSPACE_OPTIONS = {
   construction: [
-    { id: 'directory', icon: Users, labelEn: 'Directory & Search', labelFr: 'Contacts & Recherche', labelAr: 'جهات الاتصال والبحث' },
     { id: 'operations', icon: ClipboardList, labelEn: 'Site Operations', labelFr: 'Opérations Chantier', labelAr: 'عمليات الورشة' },
     { id: 'documents', icon: FileText, labelEn: 'Invoices & Vouchers', labelFr: 'Factures & Bons', labelAr: 'فواتير وإيصالات' },
     { id: 'gallery', icon: Image, labelEn: 'Gallery', labelFr: 'Galerie', labelAr: 'معرض' },
   ],
   rental: [
-    { id: 'directory', icon: Users, labelEn: 'Directory & Search', labelFr: 'Contacts & Recherche', labelAr: 'جهات الاتصال والبحث' },
     { id: 'calendar', icon: Calendar, labelEn: 'Calendar', labelFr: 'Calendrier', labelAr: 'التقويم' },
     { id: 'bookings', icon: Calendar, labelEn: 'Bookings', labelFr: 'Réservations', labelAr: 'حجوزات' },
     { id: 'revenue', icon: TrendingUp, labelEn: 'Revenue', labelFr: 'Revenus', labelAr: 'إيرادات' },
@@ -162,6 +157,7 @@ export default function App() {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [sidebarOption, setSidebarOption] = useState<string | null>(null);
   const [showAIAssistant, setShowAIAssistant] = useState(false);
+  const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [pendingAiNav, setPendingAiNav] = useState<PendingAiNav | null>(null);
   const [pendingProjectSettingsId, setPendingProjectSettingsId] = useState<string | null>(null);
   const [pendingAiDocumentDraft, setPendingAiDocumentDraft] = useState<{
@@ -171,6 +167,39 @@ export default function App() {
 
   useEscapeToClose(showAddModal, () => setShowAddModal(false));
   useEscapeToClose(showAIAssistant, () => setShowAIAssistant(false));
+  useEscapeToClose(showGlobalSearch, () => setShowGlobalSearch(false));
+
+  // Universal search shortcut: Ctrl+K / Cmd+K from anywhere in the app.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setShowGlobalSearch((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const handleGlobalSearchNavigate = useCallback(
+    (projectId: string, tab: PendingAiNav['tab'], itemId?: string, itemKind?: 'task' | 'expense') => {
+      const target = projects.find((item) => item.id === projectId);
+      if (!target) return;
+      if (target.projectType === 'rental') setCurrentView('rental');
+      else if (target.projectType === 'construction') setCurrentView('construction');
+      setSelectedProjectId(projectId);
+      setSidebarOption(null);
+      setPendingAiNav({
+        projectId,
+        tab,
+        ...(itemKind === 'task' && itemId ? { taskId: itemId } : {}),
+        ...(itemKind === 'expense' && itemId ? { expenseId: itemId } : {}),
+      });
+      setShowGlobalSearch(false);
+      closeSidebarOnMobile();
+    },
+    [projects]
+  );
 
   const activeProject =
     selectedProjectId != null
@@ -185,38 +214,9 @@ export default function App() {
   const [budget, setBudget] = useState(0);
   const [currency, setCurrency] = useState('DH');
 
-  // Swipe gesture handling
-  useEffect(() => {
-    let touchStartX = 0;
-
-    const handleTouchStart = (e: TouchEvent) => {
-      touchStartX = e.touches[0].clientX;
-    };
-
-    const handleTouchEnd = (e: TouchEvent) => {
-      const touchEndX = e.changedTouches[0].clientX;
-      const diff = touchEndX - touchStartX;
-
-      // Only handle swipe if it's a significant movement
-      if (Math.abs(diff) > 50) {
-        if (diff > 0) {
-          // Swipe right - open sidebar
-          setSidebarOpen(true);
-        } else {
-          // Swipe left - close sidebar
-          setSidebarOpen(false);
-        }
-      }
-    };
-
-    window.addEventListener('touchstart', handleTouchStart);
-    window.addEventListener('touchend', handleTouchEnd);
-
-    return () => {
-      window.removeEventListener('touchstart', handleTouchStart);
-      window.removeEventListener('touchend', handleTouchEnd);
-    };
-  }, []);
+  // Note: no swipe gesture for the sidebar — edge swipes kept misfiring on
+  // tables, carousels, and forms. The sidebar toggle button is the single,
+  // predictable way to open/close it on every device.
 
   const sf = SIDEBAR_TRANSLATIONS[language];
 
@@ -230,6 +230,7 @@ export default function App() {
     consumePendingNav,
     highlightInvitationId,
     setHighlightInvitationId,
+    busyInvitationId,
     handleMarkRead,
     handleMarkAllRead,
     handleNavigate: navigateFromNotification,
@@ -486,14 +487,6 @@ export default function App() {
   const unavailableWorkspaceSelected =
     activeProject?.projectType === 'service';
   const handleWorkspaceOptionClick = (optionId: string) => {
-    if (optionId === 'directory') {
-      const nextOption = sidebarOption === optionId ? null : optionId;
-      setSidebarOption(nextOption);
-      if (nextOption) setSelectedProjectId(null);
-      closeSidebarOnMobile();
-      return;
-    }
-
     if (
       currentView === 'construction' &&
       (optionId === 'documents' || optionId === 'gallery' || optionId === 'operations')
@@ -540,7 +533,7 @@ export default function App() {
                 transition={overlay}
                 onClick={() => setSidebarOpen(false)}
                 className="fixed inset-0 bg-black/45 backdrop-blur-[1px] max-sm:backdrop-blur-none lg:hidden transform-gpu"
-                style={{ zIndex: 2147483646 }}
+                style={{ zIndex: 105 }}
                 aria-hidden="true"
               />
             )}
@@ -563,35 +556,23 @@ export default function App() {
       {/* Backdrop when sidebar is open on mobile / tablet */}
       {mobileSidebarBackdrop}
 
-      {/* Sidebar — slides in on mobile, collapses on desktop */}
+      {/* Sidebar — slides in on mobile, collapses on desktop.
+          Mobile z stays below every modal/panel (notifications 130, task panel 130,
+          confirm 160, receipt viewer 200) so an open drawer can never trap a dialog. */}
       <aside 
-        className={`mobile-sidebar-drawer fixed inset-y-0 left-0 z-[2147483647] flex w-72 max-w-[calc(100vw-3rem)] flex-col justify-between border-r border-slate-200 bg-[#f9f9f8] pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] select-none shadow-2xl dark:border-slate-850/70 dark:bg-[#161616] lg:relative lg:z-40 lg:max-w-none lg:shrink-0 lg:py-0 lg:shadow-none ${
+        className={`mobile-sidebar-drawer fixed inset-y-0 left-0 z-[110] flex w-72 max-w-[calc(100vw-3rem)] flex-col justify-between border-r border-slate-200 bg-[#f9f9f8] pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] select-none shadow-2xl dark:border-slate-850/70 dark:bg-[#161616] lg:sticky lg:top-0 lg:bottom-auto lg:z-40 lg:h-screen lg:max-w-none lg:shrink-0 lg:py-0 lg:shadow-none ${
           sidebarOpen
             ? 'lg:w-64'
             : 'lg:w-0 lg:overflow-hidden lg:border-r-0'
         }`}
         data-open={sidebarOpen ? 'true' : 'false'}
-        style={{ zIndex: 2147483647 }}
         aria-hidden={!sidebarOpen}
         aria-label={currentView === 'construction' ? 'Construction navigation' : 'Rental navigation'}
       >
         <div className={`flex h-full w-full flex-col justify-between lg:w-64 lg:transition-opacity lg:duration-[280ms] lg:ease-[cubic-bezier(0.22,1,0.36,1)] ${sidebarOpen ? 'lg:opacity-100' : 'pointer-events-none lg:invisible lg:opacity-0'}`}>
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between border-b border-slate-100 bg-slate-100/30 px-4 py-3.5 dark:border-slate-900 dark:bg-slate-950/20">
-                <div className="flex max-w-[80%] items-center gap-2 truncate">
-                  <div className="shrink-0">
-                    <HSLogo className="h-8 w-8" compact />
-                  </div>
-                  <div className="truncate">
-                    <span className="block truncate font-sans text-[12.5px] font-bold leading-none tracking-tight text-slate-900 dark:text-slate-105">
-                      HS Tracker
-                    </span>
-                    <span className="mt-0.5 block truncate font-mono text-[9.5px] tracking-wide flex items-center gap-1">
-                      {currentView === 'construction' && <><Building className="w-3 h-3 text-sky-500" /><span className="text-sky-500">{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}</span></>}
-                      {currentView === 'rental' && <><KeyRound className="w-3 h-3 text-purple-500" /><span className="text-purple-500">{language === 'en' ? 'Rentals' : language === 'fr' ? 'Locations' : 'إيجارات'}</span></>}
-                    </span>
-                  </div>
-                </div>
+            <div className="flex items-center justify-between border-b border-slate-100 bg-slate-100/30 px-4 py-3 dark:border-slate-900 dark:bg-slate-950/20">
+                <HSLogo className="h-8 w-auto max-w-44" compact />
               <button
                 type="button"
                 onClick={() => setSidebarOpen(false)}
@@ -607,7 +588,7 @@ export default function App() {
             <div className="px-3 py-3 border-b border-slate-100 dark:border-slate-900/40 space-y-1.5 font-sans">
               <button
                 onClick={() => { setSelectedProjectId(null); setSidebarOption(null); closeSidebarOnMobile(); }}
-                className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+                className={`w-full text-left px-4 py-3 rounded-xl text-sm font-semibold flex items-center gap-3 transition-all cursor-pointer ${
                   selectedProjectId === null 
                     ? 'bg-slate-200/50 dark:bg-slate-850/80 text-sky-600 dark:text-sky-400' 
                     : 'text-slate-600 dark:text-slate-350 hover:bg-slate-100 dark:hover:bg-slate-850'
@@ -619,8 +600,8 @@ export default function App() {
 
               <button
                 id="sidebar-new-workspace-btn"
-                onClick={() => setShowAddModal(true)}
-                className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-slate-600 dark:text-slate-350 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
+                onClick={() => { setShowAddModal(true); closeSidebarOnMobile(); }}
+                className="w-full text-left px-4 py-3 rounded-xl text-sm font-semibold flex items-center gap-3 text-slate-600 dark:text-slate-350 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
               >
                 <Plus className="w-4 h-4 opacity-80 text-sky-500" />
                 <span>{
@@ -628,14 +609,6 @@ export default function App() {
                     ? (language === 'en' ? 'New Project' : language === 'fr' ? 'Nouveau Projet' : 'مشروع جديد')
                     : (language === 'en' ? 'New Property' : language === 'fr' ? 'Nouvelle Propriété' : 'عقار جديد')
                 }</span>
-              </button>
-
-              <button
-                onClick={() => { setCurrentView('welcome'); setSidebarOption(null); }}
-                className="w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
-              >
-                <span className="text-[10px] opacity-70">⌂</span>
-                <span>{language === 'en' ? 'Switch Workspace' : language === 'fr' ? 'Changer d\'espace' : 'تبديل مساحة العمل'}</span>
               </button>
             </div>
 
@@ -652,7 +625,7 @@ export default function App() {
                       <button
                         key={opt.id}
                         onClick={() => handleWorkspaceOptionClick(opt.id)}
-                        className={`w-full text-left px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2.5 transition-all cursor-pointer ${
+                        className={`w-full text-left px-4 py-3 rounded-xl text-sm font-semibold flex items-center gap-3 transition-all cursor-pointer ${
                           isActive
                             ? currentView === 'construction'
                                 ? 'bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400'
@@ -734,6 +707,13 @@ export default function App() {
 
           {/* Beautiful Bottom User info & custom togglers */}
           <div className="p-3 border-t border-slate-100 dark:border-slate-900 bg-slate-100/10 dark:bg-slate-950/10 font-sans space-y-3 shrink-0">
+            <button
+              onClick={() => { setCurrentView('welcome'); setSidebarOption(null); }}
+              className="w-full text-left px-4 py-3 rounded-xl text-sm font-semibold flex items-center gap-3 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-850 transition-all cursor-pointer"
+            >
+              <span className="text-[10px] opacity-70">⌂</span>
+              <span>{language === 'en' ? 'Switch Workspace' : language === 'fr' ? 'Changer d\'espace' : 'تبديل مساحة العمل'}</span>
+            </button>
             {/* User profile identifier block */}
             <div className="flex items-center justify-between gap-2.5 px-2 py-1">
               <div 
@@ -800,40 +780,7 @@ export default function App() {
             }
           >
           <AnimatePresence mode="wait">
-            {sidebarOption === 'directory' && !selectedProjectId ? (
-              <motion.div
-                key="operations-directory"
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={page}
-                className="transform-gpu"
-              >
-                <OperationsDirectory
-                  projects={projects}
-                  language={language}
-                  onLanguageChange={handleLanguageChange}
-                  theme={theme}
-                  onThemeToggle={handleThemeToggle}
-                  onBack={() => setSidebarOption(null)}
-                  onOpenProject={(id) => {
-                    const target = projects.find((item) => item.id === id);
-                    if (target?.projectType === 'rental') setCurrentView('rental');
-                    else if (target) setCurrentView('construction');
-                    setSidebarOption(null);
-                    handleSelectProject(id);
-                  }}
-                  sidebarOpen={sidebarOpen}
-                  onToggleSidebar={toggleSidebar}
-                  sidebarToggleLabel={sidebarOpen ? sf.collapse : sf.expand}
-                  unreadCount={unreadCount}
-                  onToggleNotifications={() => {
-                    setShowNotifications((open) => !open);
-                    setHighlightInvitationId(null);
-                  }}
-                />
-              </motion.div>
-            ) : currentView === 'rental' && !selectedProjectId ? (
+            {currentView === 'rental' && !selectedProjectId ? (
               <motion.div
                 key="rental-dashboard"
                 initial={{ opacity: 0, y: 6 }}
@@ -865,6 +812,7 @@ export default function App() {
                     setShowNotifications((open) => !open);
                     setHighlightInvitationId(null);
                   }}
+                  onOpenSearch={() => setShowGlobalSearch(true)}
                 />
               </motion.div>
             ) : !selectedProjectId ? (
@@ -890,6 +838,7 @@ export default function App() {
                     setShowNotifications((open) => !open);
                     setHighlightInvitationId(null);
                   }}
+                  onOpenSearch={() => setShowGlobalSearch(true)}
                   workspaceType={currentView === 'rental' ? undefined : currentView}
                   onBack={() => { setCurrentView('welcome'); setSidebarOption(null); }}
                   backLabel={language === 'en' ? 'All Workspaces' : language === 'fr' ? 'Tous les espaces' : 'جميع مساحات العمل'}
@@ -925,6 +874,7 @@ export default function App() {
                     setShowNotifications((open) => !open);
                     setHighlightInvitationId(null);
                   }}
+                  onOpenSearch={() => setShowGlobalSearch(true)}
                   pendingNav={pendingNav}
                   onPendingNavConsumed={consumePendingNav}
                   pendingAiNav={
@@ -1108,6 +1058,7 @@ export default function App() {
         notifications={notifications}
         invitations={invitations}
         highlightInvitationId={highlightInvitationId}
+        busyInvitationId={busyInvitationId}
         onMarkRead={handleMarkRead}
         onMarkAllRead={handleMarkAllRead}
         onAcceptInvitation={onAcceptInvitation}
@@ -1116,6 +1067,16 @@ export default function App() {
       />
 
       <AIAssistantFab onClick={() => setShowAIAssistant(true)} language={language} />
+      <Suspense fallback={null}>
+        <GlobalSearch
+          open={showGlobalSearch}
+          onClose={() => setShowGlobalSearch(false)}
+          projects={projects}
+          language={language}
+          projectType={activeProject?.projectType ?? (currentView === 'construction' || currentView === 'rental' ? currentView : null)}
+          onNavigate={handleGlobalSearchNavigate}
+        />
+      </Suspense>
       <Suspense fallback={null}>
         <AIAssistantPanel
           open={showAIAssistant}

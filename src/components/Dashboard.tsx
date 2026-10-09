@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
   Plus,
-  DollarSign, 
   CheckSquare, 
   Layers, 
   Calendar, 
@@ -25,8 +24,13 @@ import {
 import MobileDropdownMenu from './MobileDropdownMenu';
 import TopNavbar from './TopNavbar';
 import { AnimatePresence, motion } from 'motion/react';
-import { Project, TimelineActivity, Language, ProjectType } from '../types';
+import { Project, QuoteRecord, TimelineActivity, Language, ProjectType } from '../types';
 import { TRANSLATIONS } from '../utils/mockData';
+import { getAdjustedBudget, projectSpent } from '../utils/projectFinance';
+import { quoteToProjectDraft } from '../utils/quotes';
+import { saveQuoteToDB } from '../lib/db';
+import QuotesSection from './QuotesSection';
+import WorkCalendar from './WorkCalendar';
 import { useAuth } from '../lib/AuthContext';
 import { 
   saveProjectToDB, 
@@ -38,6 +42,7 @@ import { buildActivityMemberEmails } from '../utils/activityHelpers';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useMotionConfig } from '../utils/motionPresets';
 import { appDateKey, appDateKeyAfterDays } from '../utils/dateTime';
+import { AppLoader } from './ui/AppLoader';
 
 const PROJECTS_PER_PAGE = 11;
 
@@ -52,6 +57,7 @@ interface DashboardProps {
   sidebarToggleLabel?: string;
   unreadCount?: number;
   onToggleNotifications?: () => void;
+  onOpenSearch?: () => void;
   workspaceType?: 'construction';
   onBack?: () => void;
   backLabel?: string;
@@ -68,6 +74,7 @@ export default function Dashboard({
   sidebarToggleLabel = 'Toggle sidebar',
   unreadCount = 0,
   onToggleNotifications,
+  onOpenSearch,
   workspaceType,
   onBack,
   backLabel = 'All Workspaces',
@@ -82,6 +89,7 @@ export default function Dashboard({
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [projectPage, setProjectPage] = useState(1);
+  const [isLoading, setIsLoading] = useState(true);
   useEscapeToClose(showCreateModal, () => setShowCreateModal(false));
   const { modal, modalVariants, overlayVariants, overlay } = useMotionConfig();
   const [viewMode, setViewMode] = useState<'table' | 'cards'>(() => {
@@ -108,36 +116,40 @@ export default function Dashboard({
 
   // Load and refresh state in real-time
   useEffect(() => {
-    if (!user) return;
+    if (!user?.email) {
+      setIsLoading(false);
+      return;
+    }
 
-    if (!user.email) return;
-
-    // Load recent activities scoped to the user's projects (required by Firestore security rules).
+    let isActive = true;
     const loadActivities = async (userEmail: string, projectIds: string[]) => {
       try {
         const dbActivities = await getDashboardActivities(userEmail, projectIds);
         const projectIdSet = new Set(projectIds);
-        setActivities(
-          dbActivities
-            .filter((activity) => projectIdSet.has(activity.projectId))
-            .slice(0, 10)
-        );
+        if (isActive) {
+          setActivities(
+            dbActivities
+              .filter((activity) => projectIdSet.has(activity.projectId))
+              .slice(0, 10)
+          );
+        }
       } catch (err) {
         console.warn('Activities load error:', err);
       }
     };
 
     const unsubProjects = subscribeToProjects(user.email, (updatedProjects) => {
+      if (!isActive) return;
       setProjects(updatedProjects);
+      setIsLoading(false);
       const scopedProjects = workspaceType
-        ? updatedProjects.filter(
-            (project) => (project.projectType || 'construction') === workspaceType
-          )
+        ? updatedProjects.filter((project) => (project.projectType || 'construction') === workspaceType)
         : updatedProjects;
       loadActivities(user.email, scopedProjects.map((project) => project.id));
     });
 
     return () => {
+      isActive = false;
       unsubProjects();
     };
   }, [user, workspaceType]);
@@ -259,24 +271,73 @@ export default function Dashboard({
     ? projects.filter((project) => (project.projectType || 'construction') === workspaceType)
     : projects;
   const createProjectType = workspaceType || projectType;
+  const showQuotes = !workspaceType || workspaceType === 'construction';
 
-  // Calculations for KPI numbers
-  const primaryCurrency = workspaceProjects.length > 0 ? workspaceProjects[0].currency : 'DH';
+  // Convert an approved quote into a construction project + budget, then open it.
+  const handleConvertQuote = async (quote: QuoteRecord) => {
+    if (!user?.uid || !user.email) return;
+    if (quote.convertedProjectId) {
+      onSelectProject(quote.convertedProjectId);
+      return;
+    }
+    const newProject = quoteToProjectDraft(quote, {
+      email: user.email,
+      name: user.displayName || user.email.split('@')[0],
+    });
+    try {
+      setProjects([newProject, ...projects]);
+      await saveProjectToDB(user.uid, newProject);
+      const newActivity: TimelineActivity = {
+        id: `act_${Date.now()}`,
+        projectId: newProject.id,
+        userEmail: user.email || 'system',
+        userName: user.displayName || 'System',
+        actionType: 'project_created',
+        actionDetails: `Converted quote '${quote.number}' into workspace '${newProject.name}'.`,
+        timestamp: new Date().toISOString(),
+        memberEmails: buildActivityMemberEmails(newProject),
+      };
+      await saveActivityToDB(user.uid, newActivity);
+      setActivities([newActivity, ...activities].slice(0, 8));
+      await saveQuoteToDB(user.uid, { ...quote, status: 'approved', convertedProjectId: newProject.id });
+      window.dispatchEvent(new Event('storage'));
+      onSelectProject(newProject.id);
+    } catch (err) {
+      console.error('Failed to convert quote', err);
+    }
+  };
+
+  // Calculations for KPI numbers — per-project first (team-private CRM).
+  // Never mix currencies: group spend by currency, surface over-budget + overdue.
+  // Spend is commission-inclusive and budgets include approved change orders.
+  const todayKey = appDateKey();
+  const projectSpend = (p: (typeof workspaceProjects)[number]) => projectSpent(p);
+  const projectBudget = (p: (typeof workspaceProjects)[number]) => getAdjustedBudget(p);
+  const isOverBudget = (p: (typeof workspaceProjects)[number]) => p.budget > 0 && projectSpend(p) > projectBudget(p);
+  const spendByCurrency = new Map<string, number>();
+  for (const p of workspaceProjects) {
+    spendByCurrency.set(p.currency, (spendByCurrency.get(p.currency) ?? 0) + projectSpend(p));
+  }
+  const spendEntries = [...spendByCurrency.entries()].sort((a, b) => b[1] - a[1]);
   const activeProjectsCount = workspaceProjects.filter(p => p.status !== 'completed' && p.status !== 'cancelled').length;
   const completedProjectsCount = workspaceProjects.filter(p => p.status === 'completed').length;
-  
-  const totalExpensesSum = workspaceProjects.reduce((sum, p) => {
-    return sum + p.expenses.reduce((s, e) => s + e.amount, 0);
-  }, 0);
-
-  const totalBudgetsSum = workspaceProjects.reduce((sum, p) => sum + p.budget, 0);
+  const overBudgetCount = workspaceProjects.filter(isOverBudget).length;
+  const overdueCount = workspaceProjects.reduce(
+    (sum, p) => sum + p.tasks.filter(t => t.status !== 'completed' && t.deadline && t.deadline < todayKey).length, 0);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'attention' | 'overbudget' | 'behind'>('all');
 
   const totalPendingTasksCount = workspaceProjects.reduce((sum, p) => {
     return sum + p.tasks.filter(t => t.status !== 'completed').length;
   }, 0);
 
-  // Filter projects by workspace type and search query
+  // Filter projects by workspace type and search query + health filter (per-project CRM).
   const filteredProjects = workspaceProjects.filter(project => {
+    if (statusFilter === 'overbudget' && !isOverBudget(project)) return false;
+    if (statusFilter === 'behind' && !project.tasks.some(t => t.status !== 'completed' && t.deadline && t.deadline < todayKey)) return false;
+    if (statusFilter === 'attention' && !(
+      isOverBudget(project) ||
+      project.tasks.some(t => t.status !== 'completed' && t.deadline && t.deadline < todayKey)
+    )) return false;
     const query = searchQuery.toLowerCase();
     
     // Search in project metadata
@@ -315,12 +376,6 @@ export default function Dashboard({
         sidebarToggleLabel={sidebarToggleLabel}
         showSidebarToggle
         mode="dashboard"
-        searchQuery={searchQuery}
-        onSearchChange={(value) => {
-          setSearchQuery(value);
-          setProjectPage(1);
-        }}
-        searchPlaceholder={t.searchPlaceholder}
         createLabel={t.createNewProject}
         onCreateProject={() => setShowCreateModal(true)}
         unreadCount={unreadCount}
@@ -332,6 +387,7 @@ export default function Dashboard({
           setShowMobileMenu(!showMobileMenu);
         }}
         mobileMenuOpen={showMobileMenu}
+        onOpenSearch={onOpenSearch}
         langLabel={t.langLabel}
         onBack={onBack}
         backLabel={backLabel}
@@ -360,7 +416,11 @@ export default function Dashboard({
       </AnimatePresence>
 
       {workspaceProjects.length === 0 ? (
-        /* Welcome Landing Page — Full bleed outside the container */
+        isLoading ? (
+          <div className="-mt-14 flex min-h-[calc(100dvh-3.5rem)] flex-col items-center justify-center bg-gradient-to-b from-white via-slate-50/80 to-slate-50/40 px-4 pt-14 dark:from-[#121212] dark:via-[#1a1a2e] dark:to-[#121212] sm:px-6">
+            <AppLoader label={language === 'en' ? 'Loading workspace' : language === 'fr' ? 'Chargement de l\'espace' : 'جاري تحميل مساحة العمل'} />
+          </div>
+        ) : (
         <div className="-mt-14 flex min-h-[calc(100dvh-3.5rem)] flex-col items-center justify-center bg-gradient-to-b from-white via-slate-50/80 to-slate-50/40 px-4 pt-14 text-center dark:from-[#121212] dark:via-[#1a1a2e] dark:to-[#121212] sm:px-6">
           <div className="mb-8">
             <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-sky-500 to-blue-600 shadow-lg shadow-sky-200 dark:shadow-sky-950 mb-5">
@@ -429,104 +489,135 @@ export default function Dashboard({
             </button>}
           </div>
         </div>
-      ) : (
+        )
+      ) : null}
+      {(workspaceProjects.length > 0 || isLoading) && (
         <div className="mx-auto w-full max-w-7xl flex-1 px-4 pb-8 pt-6 sm:px-6 lg:px-8">
-        <p className="mb-6 max-w-2xl text-sm text-slate-500 dark:text-slate-400">
-          {language === 'en'
-            ? 'Intuitive site expense ledger, cost sharing calculations and settlements'
-            : language === 'fr'
-            ? 'Grille de dépenses intuitive, répartition des coûts par membre et solutions'
-            : 'دفتر مصاريف الموقع السلس، حسابات تقاسم التكاليف والتسويات'}
-        </p>
+          <p className="mb-6 max-w-2xl text-sm text-slate-500 dark:text-slate-400">
+            {language === 'en'
+              ? 'Intuitive site expense ledger, cost sharing calculations and settlements'
+              : language === 'fr'
+              ? 'Grille de dépenses intuitive, répartition des coûts par membre et solutions'
+              : 'دفتر مصاريف الموقع السلس، حسابات تقاسم التكاليف والتسويات'}
+          </p>
 
-        {/* Module Navigation */}
-        <div className="flex items-center gap-2 mt-4 mb-2">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-1">{language === 'en' ? 'Modules:' : language === 'fr' ? 'Modules :' : 'الوحدات:'}</span>
-          <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 cursor-default">
-            <Building className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}
-          </span>
-        </div>
+          {/* Module Navigation */}
+          <div className="flex items-center gap-2 mt-4 mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-1">{language === 'en' ? 'Modules:' : language === 'fr' ? 'Modules :' : 'الوحدات:'}</span>
+            <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 cursor-default">
+              <Building className="w-3 h-3 inline mr-1" />{language === 'en' ? 'Construction' : language === 'fr' ? 'Construction' : 'بناء'}
+            </span>
+          </div>
 
       {/* Bento Grid Highlights Statistics (Shadcn KPI Cards) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6" id="bento-stats-grid">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mt-8" id="bento-stats-grid">
         {/* Metric 1 */}
-        <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:shadow-sm transition-all relative overflow-hidden">
+        <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
           <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider font-sans">
+            <span className="text-xs font-bold uppercase tracking-wider font-sans">
               {t.activeProjects}
             </span>
-            <Layers className="w-4 h-4 text-slate-400" />
+            <Layers className="w-5 h-5 text-slate-400" />
           </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
+          <div className="mt-3 flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
               {activeProjectsCount}
             </span>
-            <span className="text-xs text-slate-450 font-mono">
+            <span className="text-sm text-slate-450 font-mono">
               / {workspaceProjects.length} {language === "en" ? "total" : language === "fr" ? "au total" : "إجمالي"}
             </span>
           </div>
         </div>
 
         {/* Metric 2 */}
-        <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:shadow-sm transition-all relative overflow-hidden">
+        <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
           <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider font-sans">
+            <span className="text-xs font-bold uppercase tracking-wider font-sans">
               {t.completedProjects}
             </span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+            <CheckCircle2 className="w-5 h-5 text-emerald-500" />
           </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
+          <div className="mt-3 flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
               {completedProjectsCount}
             </span>
-            <span className="text-xs text-slate-400">
+            <span className="text-sm text-slate-400">
               {language === 'en' ? 'Archived safely' : language === 'fr' ? 'Finis et archivés' : 'مؤرشف بأمان'}
             </span>
           </div>
         </div>
 
-        {/* Metric 3 */}
-        <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:shadow-sm transition-all relative overflow-hidden">
+        {/* Metric 3 — no global money total: each project has its own ledger */}
+        <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
           <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider font-sans">
-              {t.totalExpenses}
+            <span className="text-xs font-bold uppercase tracking-wider font-sans">
+              {language === 'en' ? 'Needs attention' : language === 'fr' ? 'À surveiller' : 'يحتاج متابعة'}
             </span>
-            <DollarSign className="w-4 h-4 text-amber-500" />
+            <AlertTriangle className={`w-5 h-5 ${overBudgetCount > 0 || overdueCount > 0 ? 'text-rose-500' : 'text-emerald-500'}`} />
           </div>
-          <div className="mt-2 flex items-baseline gap-1">
-            <span className="text-2xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
-              {totalExpensesSum.toLocaleString()}
+          <div className="mt-3 flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
+              {overBudgetCount + (overdueCount > 0 ? 1 : 0)}
             </span>
-            <span className="text-[10px] text-slate-400 font-mono font-bold uppercase">
-              {primaryCurrency}
+            <span className="text-sm text-slate-400">
+              {language === 'en'
+                ? overBudgetCount === 0 && overdueCount === 0 ? 'All projects healthy' : `${overBudgetCount} over budget · ${overdueCount} overdue tasks`
+                : language === 'fr'
+                  ? overBudgetCount === 0 && overdueCount === 0 ? 'Tout est sain' : `${overBudgetCount} en dépassement · ${overdueCount} tâches en retard`
+                  : overBudgetCount === 0 && overdueCount === 0 ? 'كل المشاريع سليمة' : `${overBudgetCount} تجاوز الميزانية · ${overdueCount} مهام متأخرة`}
             </span>
           </div>
-          {/* Progress miniature line */}
-          <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full mt-2.5 overflow-hidden">
-            <div 
-              className="bg-sky-500 h-full rounded-full transition-all duration-500"
-              style={{ width: `${Math.min(100, (totalExpensesSum / (totalBudgetsSum || 1)) * 100)}%` }}
-            />
-          </div>
+          <p className="mt-2 text-sm text-slate-400">
+            {language === 'en'
+              ? 'Expenses live inside each project — open a workspace below.'
+              : language === 'fr'
+                ? 'Les dépenses sont dans chaque chantier — ouvrez un espace ci-dessous.'
+                : 'المصاريف داخل كل مشروع — افتح مساحة عمل بالأسفل.'}
+          </p>
         </div>
 
         {/* Metric 4 */}
-        <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl hover:shadow-sm transition-all relative overflow-hidden">
+        <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl hover:shadow-md transition-all relative overflow-hidden">
           <div className="flex items-center justify-between text-slate-500 dark:text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider font-sans">
+            <span className="text-xs font-bold uppercase tracking-wider font-sans">
               {t.pendingTasks}
             </span>
-            <CheckSquare className="w-4 h-4 text-sky-505" />
+            <CheckSquare className="w-5 h-5 text-sky-505" />
           </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
+          <div className="mt-3 flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-slate-900 dark:text-white font-mono tracking-tight">
               {totalPendingTasksCount}
             </span>
-            <span className="text-xs text-rose-500 font-semibold flex items-center gap-0.5">
+            <span className="text-sm text-rose-500 font-semibold flex items-center gap-1">
               <AlertTriangle className="w-3 h-3 inline" /> {language === 'en' ? 'Checkpoints' : language === 'fr' ? 'Jalons' : 'نقاط تفتيش'}
+              {overdueCount > 0 && <span className="ml-1 rounded bg-rose-100 px-1.5 py-0.5 font-mono text-[10px] text-rose-700 dark:bg-rose-950/50 dark:text-rose-300">{overdueCount} {language === 'en' ? 'overdue' : language === 'fr' ? 'en retard' : 'متأخر'}</span>}
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Health filter chips — direct CRM workflow */}
+      <div className="mt-4 flex flex-wrap items-center gap-2" id="project-health-filters">
+        {([
+          ['all', language === 'en' ? 'All' : language === 'fr' ? 'Tous' : 'الكل'],
+          ['attention', language === 'en' ? `Needs attention` : language === 'fr' ? `À suivre` : 'يحتاج متابعة'],
+          ['overbudget', language === 'en' ? `Over budget${overBudgetCount ? ` (${overBudgetCount})` : ''}` : language === 'fr' ? `Dépassement${overBudgetCount ? ` (${overBudgetCount})` : ''}` : `تجاوز الميزانية${overBudgetCount ? ` (${overBudgetCount})` : ''}`],
+          ['behind', language === 'en' ? `Behind${overdueCount ? ` (${overdueCount})` : ''}` : language === 'fr' ? `En retard${overdueCount ? ` (${overdueCount})` : ''}` : `متأخر${overdueCount ? ` (${overdueCount})` : ''}`],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => { setStatusFilter(key); setProjectPage(1); }}
+            className={`rounded-full border px-3 py-1 text-xs font-semibold transition-all cursor-pointer ${statusFilter === key ? 'border-slate-900 bg-slate-900 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300'}`}
+          >
+            {label}
+          </button>
+        ))}
+        {spendEntries.length > 1 && (
+          <span className="text-[10px] font-mono text-slate-400">
+            {spendEntries.map(([c, s]) => `${s.toLocaleString()} ${c}`).join(' · ')}
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-8">
@@ -615,7 +706,8 @@ export default function Dashboard({
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
                   {visibleProjects.map((project, index) => {
-                    const totalSpent = project.expenses.reduce((s, e) => s + e.amount, 0);
+                    const totalSpent = projectSpent(project);
+                    const adjustedBudget = getAdjustedBudget(project);
                     const progressPct = project.tasks.length > 0
                       ? Math.round((project.tasks.filter(t => t.status === 'completed').length / project.tasks.length) * 100)
                       : 0;
@@ -660,17 +752,17 @@ export default function Dashboard({
                             {project.projectType === 'construction' && project.budget > 0 ? (
                               <>
                                 <div className="flex justify-between items-center text-[10px] font-mono">
-                                  <span className={totalSpent > project.budget ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-slate-900 dark:text-slate-200 font-semibold'}>
+                                  <span className={totalSpent > adjustedBudget ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-slate-900 dark:text-slate-200 font-semibold'}>
                                     {totalSpent.toLocaleString()}
                                   </span>
-                                  <span className="text-slate-400">/{project.budget.toLocaleString()} {project.currency}</span>
+                                  <span className="text-slate-400">/{adjustedBudget.toLocaleString()} {project.currency}</span>
                                 </div>
                                 <div className="w-full bg-slate-100 dark:bg-slate-800 h-1 rounded-full overflow-hidden">
                                   <div
                                     className={`h-full rounded-full transition-all duration-300 ${
-                                      totalSpent > project.budget ? 'bg-rose-500' : 'bg-slate-900 dark:bg-slate-100'
+                                      totalSpent > adjustedBudget ? 'bg-rose-500' : 'bg-slate-900 dark:bg-slate-100'
                                     }`}
-                                    style={{ width: `${Math.min(100, (totalSpent / project.budget) * 100)}%` }}
+                                    style={{ width: `${Math.min(100, (totalSpent / (adjustedBudget || 1)) * 100)}%` }}
                                   />
                                 </div>
                               </>
@@ -718,9 +810,10 @@ export default function Dashboard({
               </table>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               {visibleProjects.map((project, index) => {
-                const totalSpent = project.expenses.reduce((s, e) => s + e.amount, 0);
+                const totalSpent = projectSpent(project);
+                const adjustedBudget = getAdjustedBudget(project);
                 const progressPct = project.tasks.length > 0
                   ? Math.round((project.tasks.filter(t => t.status === 'completed').length / project.tasks.length) * 100)
                   : 0;
@@ -731,13 +824,13 @@ export default function Dashboard({
                     initial={{ opacity: 0, x: 24 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ duration: 0.24, delay: index * 0.03, ease: [0.22, 1, 0.36, 1] }}
-                    className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-slate-350 dark:hover:border-slate-700 transition-all rounded-xl cursor-pointer flex flex-col justify-between hover:shadow-md"
+                    className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-slate-350 dark:hover:border-slate-700 transition-all rounded-2xl cursor-pointer flex flex-col justify-between hover:shadow-md"
                     onClick={() => onSelectProject(project.id)}
                     id={`project-card-${project.id}`}
                   >
                     <div>
-                      <div className="flex items-center justify-between gap-2 mb-2">
-                        <span className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider font-mono ${
+                      <div className="flex items-center justify-between gap-2 mb-3">
+                        <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider font-mono ${
                           project.status === 'in_progress' ? 'bg-amber-100 text-amber-900 dark:bg-amber-900/15 dark:text-amber-400' :
                           project.status === 'completed' ? 'bg-emerald-100 text-emerald-990 dark:bg-emerald-900/15 dark:text-emerald-400' :
                           'bg-slate-100 text-slate-800 dark:bg-slate-850 dark:text-slate-300'
@@ -745,12 +838,12 @@ export default function Dashboard({
                           {t.status[project.status]}
                         </span>
                         
-                        <span className="text-[10px] font-mono text-slate-400">
+                        <span className="text-xs font-mono text-slate-400">
                           {project.startDate}
                         </span>
                       </div>
 
-                      <h4 className="font-sans font-semibold text-sm text-slate-900 dark:text-white hover:text-sky-600 transition-colors flex items-center gap-1.5">
+                      <h4 className="font-sans font-semibold text-lg text-slate-900 dark:text-white hover:text-sky-600 transition-colors flex items-center gap-2">
                         {project.name}
                         <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider font-mono ${
                           project.projectType === 'construction' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/20 dark:text-blue-400' :
@@ -760,15 +853,24 @@ export default function Dashboard({
                           {project.projectType === 'construction' ? 'B' : project.projectType === 'rental' ? 'R' : 'S'}
                         </span>
                       </h4>
-                      
-                      <p className="text-xs text-slate-500 dark:text-slate-440 mt-1.5 line-clamp-2 leading-relaxed">
-                        {project.description}
-                      </p>
 
-                      <div className="flex items-center gap-1 text-[10.5px] text-slate-400 mt-2 font-mono">
-                        <MapPin className="w-3 h-3 text-sky-600 shrink-0" />
-                        <span className="truncate">{project.address}</span>
-                      </div>
+                      <details
+                        className="ux-details mt-2 rounded-xl bg-slate-50/70 px-3 dark:bg-slate-950/40"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <summary className="text-sm text-slate-600 dark:text-slate-300">
+                          {language === 'en' ? 'More details' : language === 'fr' ? 'Plus de détails' : 'مزيد من التفاصيل'}
+                        </summary>
+                        <div className="pb-3">
+                          <p className="text-sm text-slate-500 dark:text-slate-440 leading-relaxed">
+                            {project.description}
+                          </p>
+                          <div className="flex items-center gap-1.5 text-sm text-slate-400 mt-2 font-mono">
+                            <MapPin className="w-4 h-4 text-sky-600 shrink-0" />
+                            <span className="truncate">{project.address} · {project.clientName}</span>
+                          </div>
+                        </div>
+                      </details>
                     </div>
 
                     <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-850">
@@ -777,7 +879,7 @@ export default function Dashboard({
                           <div className="flex justify-between items-center text-[11px] mb-1.5">
                             <span className="text-slate-500">{language === 'en' ? 'Spent vs Budget' : language === 'fr' ? 'Dépenses / Budget' : 'المستنفد مقابل الميزانية'}</span>
                             <span className="font-mono font-bold text-slate-900 dark:text-slate-200">
-                              {totalSpent.toLocaleString()} / <span className="text-slate-400 font-medium">{project.budget.toLocaleString()} {project.currency}</span>
+                              {totalSpent.toLocaleString()} / <span className="text-slate-400 font-medium">{adjustedBudget.toLocaleString()} {project.currency}</span>
                             </span>
                           </div>
 
@@ -785,9 +887,9 @@ export default function Dashboard({
                           <div className="w-full bg-slate-100 dark:bg-slate-850 h-1.5 rounded-full overflow-hidden mb-3">
                             <div 
                               className={`h-full rounded-full transition-all duration-300 ${
-                                totalSpent > project.budget ? 'bg-rose-500' : 'bg-slate-900 dark:bg-slate-100'
+                                totalSpent > adjustedBudget ? 'bg-rose-500' : 'bg-slate-900 dark:bg-slate-100'
                               }`}
-                              style={{ width: `${Math.min(100, (totalSpent / project.budget) * 100)}%` }}
+                              style={{ width: `${Math.min(100, (totalSpent / (adjustedBudget || 1)) * 100)}%` }}
                             />
                           </div>
                         </>
@@ -911,6 +1013,18 @@ export default function Dashboard({
           </div>
         </div>
       </div>
+
+      {showQuotes && (
+        <div className="mt-6">
+          <WorkCalendar language={language} projects={workspaceProjects} onOpenProject={onSelectProject} />
+        </div>
+      )}
+
+      {showQuotes && (
+        <div className="mt-6">
+          <QuotesSection language={language} onConvertToProject={handleConvertQuote} />
+        </div>
+      )}
         </div>
       )}
 

@@ -21,6 +21,8 @@ interface NotificationsPanelProps {
   notifications: AppNotification[];
   invitations: Invitation[];
   highlightInvitationId?: string | null;
+  /** Invitation id currently being accepted/declined — its buttons stay disabled. */
+  busyInvitationId?: string | null;
   onMarkRead: (notif: AppNotification) => void;
   onMarkAllRead: () => void;
   onAcceptInvitation: (invite: Invitation) => void;
@@ -117,6 +119,7 @@ export default function NotificationsPanel({
   notifications,
   invitations,
   highlightInvitationId,
+  busyInvitationId = null,
   onMarkRead,
   onMarkAllRead,
   onAcceptInvitation,
@@ -217,20 +220,22 @@ export default function NotificationsPanel({
                     <div className="mt-2.5 flex flex-wrap gap-2">
                       <button
                         type="button"
+                        disabled={busyInvitationId === invite.id}
                         onClick={() => {
                           onAcceptInvitation(invite);
                           onClose();
                         }}
-                        className="cursor-pointer rounded-md bg-indigo-600 px-2.5 py-1 text-[10px] font-semibold text-white shadow-sm hover:bg-indigo-500"
+                        className="cursor-pointer rounded-md bg-indigo-600 px-2.5 py-1 text-[10px] font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-60"
                       >
-                        {t.accept}
+                        {busyInvitationId === invite.id ? '…' : t.accept}
                       </button>
                       <button
                         type="button"
+                        disabled={busyInvitationId === invite.id}
                         onClick={() => onDeclineInvitation(invite)}
-                        className="cursor-pointer rounded-md bg-slate-200 px-2.5 py-1 text-[10px] font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                        className="cursor-pointer rounded-md bg-slate-200 px-2.5 py-1 text-[10px] font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300 disabled:cursor-wait disabled:opacity-60"
                       >
-                        {t.decline}
+                        {busyInvitationId === invite.id ? '…' : t.decline}
                       </button>
                     </div>
                   </div>

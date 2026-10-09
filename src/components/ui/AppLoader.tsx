@@ -17,13 +17,11 @@ export function AppLoader({ label }: AppLoaderProps) {
         className="relative"
       >
         <motion.div
-          className="absolute inset-0 rounded-2xl bg-cyan-400/20 blur-xl"
+          className="absolute inset-0 rounded-full bg-cyan-400/20 blur-xl"
           animate={{ scale: [1, 1.15, 1], opacity: [0.4, 0.7, 0.4] }}
           transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
         />
-        <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl border border-white/60 bg-white/80 shadow-lg backdrop-blur dark:border-slate-700 dark:bg-slate-900/80">
-          <HSLogo className="h-10 w-10" compact />
-        </div>
+        <HSLogo className="relative h-16 w-auto max-w-[70vw]" compact />
       </motion.div>
       <motion.div
         initial={{ opacity: 0, y: 8 }}

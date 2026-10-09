@@ -1,6 +1,7 @@
 import { Project } from '../types';
 import { calculateSettlements } from './mockData';
 import { resolveUserRole } from './permissions';
+import { taskOwnerEmail } from './taskState';
 
 /** Compact list of all workspaces for dashboard / global AI mode */
 export function buildWorkspaceContext(projects: Project[], userEmail: string): string {
@@ -10,7 +11,7 @@ export function buildWorkspaceContext(projects: Project[], userEmail: string): s
     const { totalSpent } = calculateSettlements(p);
     const role = resolveUserRole(p, email);
     const myTasks = p.tasks
-      .filter((t) => (t.assignedTo || '').toLowerCase() === email)
+      .filter((t) => taskOwnerEmail(t).toLowerCase() === email)
       .map((t) => ({ id: t.id, title: t.title, status: t.status }));
 
     return {

@@ -10,6 +10,10 @@ const ACTION_LABELS: Record<ActivityActionType, { en: string; fr: string; ar: st
   subtask_changed: { en: 'Changed subtasks', fr: 'Sous-tâches modifiées', ar: 'عدّل مهام فرعية' },
   status_changed: { en: 'Settings / system', fr: 'Paramètres / système', ar: 'إعدادات / نظام' },
   project_created: { en: 'Created project', fr: 'Projet créé', ar: 'أنشأ مشروعاً' },
+  project_updated: { en: 'Updated project', fr: 'Projet modifié', ar: 'عدّل مشروعاً' },
+  section_updated: { en: 'Updated sections', fr: 'Sections modifiées', ar: 'عدّل الأقسام' },
+  change_order_approved: { en: 'Approved change order', fr: 'Avenant approuvé', ar: 'وافق على أمر تغيير' },
+  change_order_rejected: { en: 'Rejected change order', fr: 'Avenant refusé', ar: 'رفض أمر تغيير' },
   member_joined: { en: 'Team / members', fr: 'Équipe / membres', ar: 'الفريق / الأعضاء' },
   document_added: { en: 'Document', fr: 'Document', ar: 'مستند' },
   photo_uploaded: { en: 'Photo', fr: 'Photo', ar: 'صورة' },
@@ -25,13 +29,16 @@ export function activityCategory(type: ActivityActionType): ActivityFilterCatego
   if (type.startsWith('task') || type === 'subtask_changed') return 'tasks';
   if (type.startsWith('expense')) return 'expenses';
   if (type === 'member_joined') return 'members';
-  if (type === 'status_changed' || type === 'project_created') return 'settings';
+  if (type === 'status_changed' || type === 'project_created' || type === 'project_updated') return 'settings';
+  if (type === 'section_updated' || type === 'change_order_approved' || type === 'change_order_rejected') return 'settings';
   return 'settings';
 }
 
 export function activityTone(type: ActivityActionType): string {
   if (type.includes('deleted')) return 'text-red-600 dark:text-red-400';
+  if (type === 'change_order_rejected') return 'text-red-600 dark:text-red-400';
   if (type === 'task_created' || type === 'expense_added' || type === 'expense_updated') return 'text-emerald-600 dark:text-emerald-400';
+  if (type === 'change_order_approved' || type === 'section_updated') return 'text-emerald-600 dark:text-emerald-400';
   if (type === 'subtask_changed') return 'text-violet-600 dark:text-violet-400';
   if (type === 'member_joined') return 'text-amber-600 dark:text-amber-400';
   return 'text-cyan-700 dark:text-cyan-400';

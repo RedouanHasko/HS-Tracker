@@ -134,7 +134,7 @@ export default function InstallAppPrompt({ language }: { language: Language }) {
         >
           <div className="mx-auto flex max-w-md items-start gap-3 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-2xl backdrop-blur-md dark:border-slate-700 dark:bg-slate-900/95">
             <div className="shrink-0 rounded-xl bg-slate-100 p-2 dark:bg-slate-800">
-              <HSLogo className="h-10 w-10" compact />
+              <HSLogo className="h-10 w-auto" compact />
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-bold text-slate-900 dark:text-white">
